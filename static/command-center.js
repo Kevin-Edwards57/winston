@@ -128,8 +128,16 @@ function renderReasoning(root,data){
   // The offer and why it was chosen.
   const offer=brief.recommended_service||brief.recommended_product;
   const rows=[['Recommended',offer?offer.name:'None'],['Kind',offer?offer.kind:'\u2014'],['Intent',brief.intent||'\u2014']];
-  if(offer&&offer.price_min_usd!=null)rows.push(['Catalogue range',`$${offer.price_min_usd} to $${offer.price_max_usd}`]);
-  else rows.push(['Pricing','Not yet available (pricing engine is Phase B)']);
+  const pricing=brief.pricing||{};
+  if(brief.pricing_status==='quoted'){
+    rows.push(['Recommended',`$${Math.round(pricing.target_usd).toLocaleString()}`]);
+    rows.push(['Range',`$${Math.round(pricing.floor_usd).toLocaleString()} to $${Math.round(pricing.premium_usd).toLocaleString()}`]);
+    rows.push(['Estimated effort',`${pricing.effort_hours}h at $${pricing.hourly_rate}/h`]);
+    rows.push(['Margin at target',`${Math.round((pricing.margin_at_target||0)*100)}%`]);
+    rows.push(['Price confidence',pricing.confidence]);
+  } else if(brief.pricing_status==='no_pricing_basis'){
+    rows.push(['Pricing',pricing.reason||'No pricing basis']);
+  } else rows.push(['Pricing','Not calculated']);
   (brief.scores?Object.entries(brief.scores):[]).forEach(([k,v])=>rows.push([k.replaceAll('_',' ').toLowerCase(),v==null?'unknown':v]));
   root.append(intelSection('Recommendation',rows));
 
@@ -148,6 +156,19 @@ function renderReasoning(root,data){
     pr.append(card);
   });
   root.append(pr);
+
+  // Pricing arithmetic, so a reviewer can disagree with a step rather than a number.
+  if(brief.pricing_status==='quoted'){
+    const pz=document.createElement('section');pz.className='intel-section';
+    const pzh=document.createElement('h4');pzh.textContent='How the price was built';pz.append(pzh);
+    (brief.pricing.rationale||[]).forEach(line=>{const el=document.createElement('p');el.className='intel-note';el.textContent=line;pz.append(el)});
+    (brief.pricing.adjustments||[]).forEach(adj=>{const card=document.createElement('div');card.className='evidence-card';
+      const b=document.createElement('b');b.textContent=`${adj.factor} x${adj.multiplier}`;
+      const s=document.createElement('small');s.textContent=`${adj.reason}${adj.evidence?` (${adj.evidence})`:''}`;
+      card.append(b,s);pz.append(card)});
+    (brief.pricing.scope_assumptions||[]).forEach(a=>{const el=document.createElement('p');el.className='intel-note';el.textContent=`Assumption: ${a}`;pz.append(el)});
+    root.append(pz);
+  }
 
   (brief.blockers||[]).forEach(b=>root.append(note(b)));
   root.append(intelSection('Generation',[['Provider',data.provider||'\u2014'],['Model',data.model||'\u2014'],['Tokens',`${data.input_tokens||0} in / ${data.output_tokens||0} out`],['AI cost',`$${(data.estimated_cost_usd||0).toFixed(4)}`]]));

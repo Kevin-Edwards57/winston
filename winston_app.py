@@ -25,6 +25,7 @@ from winston.fit import FitEngine
 from winston.writer import Writer
 from winston.guardian import Guardian
 from winston.pipeline import OutreachPipeline
+from winston.pricing import PricingEngine, NoPricingBasis
 
 load_dotenv()
 
@@ -39,7 +40,8 @@ signal_store.initialize()
 catalog = Catalog(repository)
 catalog.initialize()
 fit_engine = FitEngine(repository, catalog, signal_store)
-writer = Writer(repository, catalog, signal_store, fit_engine, ai_service)
+pricing_engine = PricingEngine(repository, catalog)
+writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
 pipeline.initialize()
@@ -1242,6 +1244,37 @@ def generate_draft(contact_id):
         return jsonify(pipeline.generate(contact_id).as_dict())
     except KeyError:
         return jsonify({"error": "Unknown contact"}), 404
+
+
+@app.route('/pricing')
+def pricing_readiness():
+    """What Winston needs before it can quote anything."""
+    return jsonify(pricing_engine.readiness())
+
+
+@app.route('/pricing/configure', methods=['POST'])
+def pricing_configure():
+    """Set the rate card. Winston refuses to quote until this exists."""
+    body = request.get_json(silent=True) or {}
+    try:
+        card = pricing_engine.configure(
+            hourly_rate_usd=body.get("hourly_rate_usd"),
+            min_margin=body.get("min_margin"))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "rate_card": card,
+                    "readiness": pricing_engine.readiness()})
+
+
+@app.route('/prospects/<contact_id>/price')
+def prospect_price(contact_id):
+    """An explainable band for one prospect, or the reason there is none."""
+    try:
+        brief = writer.build_brief(contact_id)
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+    return jsonify({"status": brief["pricing_status"], "pricing": brief["pricing"],
+                    "offer": brief.get("recommended_service") or brief.get("recommended_product")})
 
 
 @app.route('/catalog')

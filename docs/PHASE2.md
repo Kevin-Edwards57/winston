@@ -210,3 +210,73 @@ unqualified. `GET /research/coverage` reports this honestly.
 client-rendered withholding, positive-detection survival, server-rendered negatives
 still reporting, SSL after redirects, unfetchable sites yielding nothing, and malformed
 HTML not crashing.
+
+---
+
+## Phase B · Pricing engine
+
+`winston/pricing.py`. Scope and effort in, an explainable band out.
+
+### It refuses more often than it quotes
+
+A price is a commercial commitment YardLink then has to honour, so the engine needs a
+configured rate card and an effort estimate for the service being sold. Without either it
+raises `NoPricingBasis` and names the missing input. Guessing $1,200 because that sounds
+like a website price would be inventing an obligation.
+
+`GET /pricing` reports readiness honestly. At time of writing: no rate configured, and 15
+of 15 services carry no effort estimate.
+
+### Protected characteristics are structurally excluded
+
+Not a policy someone has to remember. Every input passes through
+`ALLOWED_PRICING_VARIABLES`, and any feature whose key or value matches a protected term
+raises `ProtectedCharacteristicError` before arithmetic runs. Race, ethnicity,
+nationality, religion, sex, disability, and cultural identity are not variables that were
+left out; they are variables the engine cannot accept.
+
+Proxies are rejected too, because `neighborhood_demographic` and `surname` are the same
+discrimination with extra steps.
+
+Matching splits whole words from stems deliberately. `age` and `black` match as complete
+words so that `page_count` and `Blackbaud` are not falsely rejected, while `ethnic` and
+`pregnan` match as prefixes so `ethnicity` and `pregnancy` are caught. A naive substring
+check flagged `page_count`, which is what prompted the split.
+
+`tests/test_pricing.py` enumerates every protected term and fails the build if any
+becomes acceptable.
+
+### Bands
+
+```
+delivery_cost = adjusted_hours x hourly_rate
+floor         = delivery_cost x (1 + min_margin)
+target        = floor x target_uplift
+premium       = target x premium_uplift
+```
+
+Every multiplier is recorded as an `Adjustment` carrying its factor, value, reason, and
+the evidence behind it, so a reviewer can disagree with a specific step rather than with
+a number. Scope assumptions are listed separately.
+
+### Discounts
+
+Ten reason codes, each with a ceiling. A discount without a recognised reason is
+rejected, a discount above its ceiling is rejected, and a discount that would breach the
+margin floor is rejected with the arithmetic shown. No reason code references a protected
+characteristic, enforced by test.
+
+### Confidence is capped
+
+There are zero won deals and zero proposals, so no comparable engagement exists for any
+service. Confidence is capped accordingly and the rationale says so explicitly rather
+than presenting an unvalidated number as authoritative.
+
+### Known limitation
+
+The default uplifts (35% minimum margin, 1.25 target, 1.35 premium) compound, and they
+are **unvalidated**. They were chosen as plausible agency defaults, not derived from
+YardLink's actual delivery costs or won deals, because neither exists yet. Absolute
+prices are driven almost entirely by the effort estimates in the catalogue. A service
+estimated at 10 hours prices very differently from one estimated at 30, and that estimate
+is the operator's to set.

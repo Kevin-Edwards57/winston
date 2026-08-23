@@ -35,6 +35,7 @@ from typing import Any
 
 from .catalog import Catalog
 from .fit import FitEngine, FitResult
+from .pricing import NoPricingBasis, PricingEngine
 from .repository import WinstonRepository, utc_now
 from .signals import SignalStore
 
@@ -239,12 +240,14 @@ class Writer:
 
     def __init__(self, repository: WinstonRepository, catalog: Catalog,
                  signal_store: SignalStore, fit_engine: FitEngine, ai_service: Any,
+                 pricing: PricingEngine | None = None,
                  *, confidence_floor: float = CONFIDENCE_FLOOR) -> None:
         self.repository = repository
         self.catalog = catalog
         self.signals = signal_store
         self.fit = fit_engine
         self.ai_service = ai_service
+        self.pricing = pricing or PricingEngine(repository, catalog)
         self.confidence_floor = confidence_floor
 
     # ── brief ────────────────────────────────────────────────────────────
@@ -260,6 +263,9 @@ class Writer:
 
         assessment: FitResult = self.fit.assess(contact_id)
         industry = (contact["business_type"] or "").casefold().strip()
+        # Raw signals feed scope estimation. An existing CMS changes migration effort,
+        # which is a technical fact about the site, not a fact about the owner.
+        signals = self.signals.for_contact(contact_id)
 
         # Only observations strong enough to assert. Weak ones are dropped, not hedged.
         usable = [p for p in assessment.problems if p.confidence >= self.confidence_floor]
@@ -286,6 +292,23 @@ class Writer:
         proof = select_proof(self.catalog, full_offer, industry,
                              {p.code for p in usable}) if offer else []
 
+        # A price is attached when one can be justified. Missing inputs are reported
+        # rather than filled in, and the email simply does not mention money.
+        pricing: dict[str, Any] | None = None
+        pricing_status = "not_attempted"
+        if offer:
+            try:
+                band = self.pricing.quote(
+                    offer=full_offer,
+                    problems=[p.as_dict() for p in usable],
+                    signals=signals,
+                    evidence_confidence=(sum(p.confidence for p in usable) / len(usable))
+                    if usable else 0.0)
+                pricing, pricing_status = band.as_dict(), "quoted"
+            except NoPricingBasis as exc:
+                pricing_status = "no_pricing_basis"
+                pricing = {"reason": str(exc)}
+
         return {
             "contact_id": contact_id,
             "business": contact["name"],
@@ -302,6 +325,8 @@ class Writer:
             "scores": assessment.as_dict()["scores"],
             "blockers": assessment.blockers,
             "intent": intent,
+            "pricing": pricing,
+            "pricing_status": pricing_status,
             "recommendation_status": "ok" if offer else "no_verified_offer",
         }
 
