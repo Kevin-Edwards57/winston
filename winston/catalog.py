@@ -268,6 +268,30 @@ SEED_ENTRIES: tuple[dict[str, Any], ...] = (
      "notes": "Citable as proof of AI automation, sales automation, and data engineering. "
               "Never present Winston as something a prospect can purchase."},
 
+    # The fulfilment engine behind the website service. A client buys the outcome
+    # (a professional site, designed, written, and delivered), not the tool that
+    # produces it. Capabilities below are limited to what PRODUCTION.md marks DONE.
+    {"slug": "website-builder", "name": "YardLink Studio Website Builder",
+     "kind": "INTERNAL_TOOL", "status": "INTERNAL_TOOL", "audience": "business",
+     "verified": 1,
+     "description": "Browser-based website builder. Structured business information goes "
+                    "in and a responsive, SEO-rich website comes out, with matching logos. "
+                    "The core path runs entirely on device with no backend.",
+     "capabilities": ["structured client intake", "industry-aware site generation",
+                      "live preview", "theme and layout system", "logo generation",
+                      "standalone HTML export", "LocalBusiness JSON-LD",
+                      "OpenGraph and meta tags", "runs offline in the browser"],
+     "limitations": ["one-click publishing to a live URL is NOT built; the publish seam "
+                     "supports download only and cloud targets are Phase 4",
+                     "no Cloudflare or worker infrastructure exists in the repository",
+                     "Supabase persistence activates only when credentials are supplied",
+                     "internal fulfilment platform, never sold to a client"],
+     "deployment_model": "internal browser-based tool",
+     "notes": "Verified against PRODUCTION.md, which marks Phase 1 (local generation, "
+              "preview, HTML download) as done. Automatic publishing and cloud hosting "
+              "are later phases and must not be claimed. Cited as the reason YardLink can "
+              "deliver websites quickly; the commercial offer is website-service."},
+
     {"slug": "errol", "name": "Errol", "kind": "INTERNAL_TOOL",
      "status": "INTERNAL_TOOL", "audience": "consumer", "verified": 1,
      "description": "AI Caribbean food guide integrated into YardLink Eats.",
@@ -280,6 +304,10 @@ SEED_ENTRIES: tuple[dict[str, Any], ...] = (
 # Candidate YardLink Studio services. Seeded UNVERIFIED by design: the operator must
 # confirm which are genuinely offered before Winston may recommend any of them.
 CANDIDATE_SERVICES: tuple[dict[str, Any], ...] = (
+    {"slug": "website-service", "name": "YardLink Studio Website Service",
+     "problems_solved": ["no website", "outdated website", "not mobile friendly",
+                         "no lead capture", "weak seo basics"],
+     "proof": ["website-builder", "yardlink-eats", "otonia"]},
     {"slug": "web-development", "name": "Web Development",
      "problems_solved": ["no website", "outdated website", "not mobile friendly",
                          "weak seo basics", "no lead capture"],

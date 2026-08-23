@@ -83,6 +83,22 @@ DISCRIMINATORY_PRICING_PATTERNS = (
     r"\b(?:discount|price|afford|budget|rate)\b[^.]{0,50}\b(?:" + "|".join(PROTECTED_TERMS) + r")",
 )
 
+# Fulfilment claims Winston cannot support. Publishing is the sharpest case: the
+# Website Builder's publish seam supports download only, with cloud targets marked
+# Phase 4 in PRODUCTION.md, so promising a live URL would be selling vapour.
+UNSUPPORTED_FULFILMENT_PATTERNS = (
+    (r"\b(?:one[- ]click|automatic(?:ally)?|instant(?:ly)?)\s+(?:publish|deploy|launch|go[- ]live)",
+     "automatic publishing"),
+    (r"\bpublish(?:ed|ing)?\s+(?:it\s+)?(?:to\s+)?(?:a\s+)?live\s+(?:url|site|website)",
+     "live publishing"),
+    (r"\b(?:we|yardlink)\s+(?:will\s+)?host\s+(?:it|your\s+site|the\s+site)", "hosting claim"),
+    (r"\bunlimited\s+(?:revisions?|customi[sz]ation|changes?|pages?)", "unlimited scope"),
+    (r"\b(?:guaranteed?|promise|ensure)\s+[^.]{0,30}\b(?:seo|ranking|traffic|leads?|revenue|sales|customers)",
+     "guaranteed outcome"),
+    (r"\b(?:rank|ranking)\s+(?:you\s+)?(?:#?1|first|top)\b", "ranking promise"),
+    (r"\bin\s+(?:just\s+)?\d+\s+(?:hours?|days?|weeks?)\b", "delivery-time claim"),
+)
+
 DEFAULT_CONFIDENCE_FLOOR = 0.5
 
 
@@ -148,6 +164,7 @@ class Guardian:
         self._check_unsupported_claims(result, text, lowered, brief)
         self._check_problem_claims(result, lowered, brief)
         self._check_commercial(result, lowered, brief)
+        self._check_fulfilment_claims(result, text, lowered)
         self._check_protected_characteristics(result, lowered)
         self._check_safety(result, contact)
 
@@ -353,6 +370,19 @@ class Guardian:
             result.fail("commercial", "no_verified_offer",
                         "No verified YardLink offer matches this prospect, so no outreach "
                         "should be generated.")
+
+    def _check_fulfilment_claims(self, result: GuardianResult, text: str, lowered: str) -> None:
+        """Block promises about delivery YardLink cannot currently keep."""
+        clean = True
+        for pattern, label in UNSUPPORTED_FULFILMENT_PATTERNS:
+            match = re.search(pattern, lowered, re.IGNORECASE)
+            if match:
+                result.fail("claim", "unsupported_fulfilment",
+                            f"{label} is not a verified YardLink capability.",
+                            text[max(0, match.start() - 30):match.end() + 30])
+                clean = False
+        if clean:
+            result.passed("claim", "no_unsupported_fulfilment")
 
     def _check_protected_characteristics(self, result: GuardianResult, lowered: str) -> None:
         clean = True

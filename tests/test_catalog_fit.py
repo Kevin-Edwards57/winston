@@ -161,6 +161,38 @@ class AudienceTests(CatalogBase):
         self.assertFalse(self.catalog.get("guardlink")["citable_as_proof"])
 
 
+class FulfilmentPlatformTests(CatalogBase):
+    """The Builder produces websites. The client buys the outcome, not the tool."""
+
+    def test_builder_is_internal_not_sellable(self):
+        builder = self.catalog.get("website-builder")
+        self.assertEqual(builder["kind"], "INTERNAL_TOOL")
+        self.assertFalse(builder["offerable_to_business"])
+        self.assertTrue(builder["citable_as_proof"])
+
+    def test_website_service_is_the_commercial_offer(self):
+        service = self.catalog.get("website-service")
+        self.assertEqual(service["kind"], "SERVICE")
+        self.catalog.verify("website-service")
+        self.assertTrue(self.catalog.get("website-service")["offerable_to_business"])
+
+    def test_builder_proves_the_service(self):
+        self.assertIn("website-builder",
+                      [p["slug"] for p in self.catalog.proof_for("website-service")])
+
+    def test_unbuilt_publishing_is_recorded_as_a_limitation(self):
+        """PRODUCTION.md marks cloud publishing as Phase 4; download only today."""
+        limitations = " ".join(self.catalog.get("website-builder")["limitations"]).casefold()
+        self.assertIn("publishing", limitations)
+        self.assertIn("not built", limitations)
+
+    def test_builder_capabilities_exclude_publishing(self):
+        capabilities = " ".join(self.catalog.get("website-builder")["capabilities"]).casefold()
+        self.assertNotIn("publish", capabilities)
+        self.assertNotIn("cloudflare", capabilities)
+        self.assertIn("standalone html export", capabilities)
+
+
 class CatalogEditingTests(CatalogBase):
     def test_products_can_be_added_without_code_changes(self):
         self.catalog.upsert({"slug": "brand-new", "name": "Brand New", "kind": "PRODUCT",

@@ -165,9 +165,12 @@ class WriterTests(PhaseABase):
 
     def test_proof_selection_is_limited(self):
         self._verify_ordering()
-        self.assertLessEqual(
-            len(select_proof(self.catalog, "ordering-systems", "jamaican restaurant")), 2,
-            "an email must not become a portfolio dump")
+        offer = self.catalog.get("ordering-systems")
+        proof = select_proof(self.catalog, offer, "jamaican restaurant",
+                             {"no_online_ordering"})
+        self.assertLessEqual(len(proof), 2, "an email must not become a portfolio dump")
+        self.assertEqual(proof[0]["slug"], "yardlink-eats",
+                         "industry standing must rank first")
 
     def test_draft_records_generation_provenance(self):
         self._research()
@@ -301,6 +304,43 @@ class GuardianCommercialTests(PhaseABase):
             "Your site has no online ordering. Given your nationality we can lower the "
             "price for you. Interested?")
         self.assertFalse(result.approved)
+
+
+class GuardianFulfilmentTests(PhaseABase):
+    """Winston must not promise delivery YardLink cannot perform."""
+
+    def setUp(self):
+        super().setUp()
+        self._research()
+        self._verify_ordering()
+
+    def test_blocks_automatic_publishing_claim(self):
+        result = self._review("Your site has no online ordering. We build it and "
+                              "one-click publish it live. Interested?")
+        self.assertFalse(result.approved)
+        self.assertIn("unsupported_fulfilment", [i["rule"] for i in result.issues])
+
+    def test_blocks_guaranteed_seo_or_leads(self):
+        for claim in ("We guarantee more leads.", "We guarantee top SEO rankings."):
+            result = self._review(f"Your site has no online ordering. {claim} Interested?")
+            self.assertFalse(result.approved, claim)
+
+    def test_blocks_unlimited_scope(self):
+        result = self._review("Your site has no online ordering. Unlimited revisions "
+                              "included. Interested?")
+        self.assertFalse(result.approved)
+
+    def test_blocks_invented_delivery_times(self):
+        result = self._review("Your site has no online ordering. We deliver in just "
+                              "3 days. Interested?")
+        self.assertFalse(result.approved)
+
+    def test_allows_an_honest_offer(self):
+        result = self._review(
+            "I noticed your site has no online ordering, so customers have to call. "
+            "YardLink builds ordering systems that let people order from the site. "
+            "Would it help to see what that could look like?")
+        self.assertTrue(result.approved, f"unexpected: {result.issues}")
 
 
 class GuardianSafetyTests(PhaseABase):

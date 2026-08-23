@@ -71,9 +71,86 @@ function selectLead(lead){
 }
 
 function renderIntel(lead){
-  const root=$('intel-content');root.className='intel-grid';root.replaceChildren();
-  const values=[['Discovery Source','Google Places'],['Industry',lead.type||'Unknown'],['Location',lead.address||'Unknown'],['Email',lead.email||'Not found'],['Phone',lead.phone||'Not found'],['Website',lead.website||'Not found'],['Email Quality',lead.email_score!=null?`${lead.email_score}/10`:'Not scored'],['Workflow',stage(lead)]];
-  values.forEach(([key,value])=>{const row=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=key;dd.textContent=value;row.append(dt,dd);root.append(row)});
+  const root=$('intel-content');root.className='intel-stack';root.replaceChildren();
+  root.append(intelSection('Business',[['Industry',lead.type||'Unknown'],['Location',lead.address||'Unknown'],['Email',lead.email||'Not found'],['Phone',lead.phone||'Not found'],['Website',lead.website||'Not found']]));
+  if(!lead.draft_id){root.append(note('No draft generated yet. Winston writes only from researched evidence.'));return}
+  const pending=note('Loading Winston\u2019s reasoning\u2026');root.append(pending);
+  fetch(`/drafts/${encodeURIComponent(lead.draft_id)}/intelligence`).then(r=>r.ok?r.json():null).then(data=>{
+    pending.remove();
+    if(!data){root.append(note('No reasoning recorded for this draft.'));return}
+    renderReasoning(root,data);
+  }).catch(()=>{pending.textContent='Could not load reasoning.'});
+}
+
+function note(text){const el=document.createElement('p');el.className='intel-note';el.textContent=text;return el}
+
+function intelSection(title,rows){
+  const box=document.createElement('section');box.className='intel-section';
+  const h=document.createElement('h4');h.textContent=title;box.append(h);
+  const dl=document.createElement('dl');dl.className='intel-grid';
+  rows.forEach(([k,v])=>{const row=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=k;dd.textContent=v;row.append(dt,dd);dl.append(row)});
+  box.append(dl);return box;
+}
+
+function pill(text,tone){const s=document.createElement('span');s.className=`pill pill-${tone}`;s.textContent=text;return s}
+
+function renderReasoning(root,data){
+  const brief=data.brief||{},verdict=data.guardian||{};
+
+  // Guardian verdict first. A reviewer should see the gate before the copy.
+  const g=document.createElement('section');g.className='intel-section';
+  const gh=document.createElement('h4');gh.textContent='Guardian';
+  gh.append(pill(verdict.approved?'PASS':'BLOCKED',verdict.approved?'ok':'bad'));g.append(gh);
+  const checks=['style_checks','evidence_checks','claim_checks','commercial_checks'];
+  const summary=document.createElement('div');summary.className='check-row';
+  checks.forEach(key=>{const list=verdict[key]||[];const failed=list.filter(c=>c.passed===false).length;
+    summary.append(pill(`${key.replace('_checks','')} ${failed?`${failed} failed`:'ok'}`,failed?'bad':'ok'))});
+  g.append(summary);
+  (verdict.issues||[]).forEach(i=>{const el=document.createElement('p');el.className='intel-issue';el.textContent=`${i.rule}: ${i.detail}`;g.append(el)});
+  (verdict.warnings||[]).slice(0,4).forEach(w=>{const el=document.createElement('p');el.className='intel-warn';el.textContent=`${w.rule}: ${w.detail}`;g.append(el)});
+  root.append(g);
+
+  // What Winston observed, with the evidence behind each claim.
+  const problems=brief.observed_problems||[];
+  const p=document.createElement('section');p.className='intel-section';
+  const ph=document.createElement('h4');ph.textContent=`What Winston found (${problems.length})`;p.append(ph);
+  if(!problems.length)p.append(note('No observations met the confidence floor.'));
+  problems.forEach(item=>{
+    const card=document.createElement('div');card.className='evidence-card';
+    const label=document.createElement('b');label.textContent=item.label;
+    const conf=pill(`confidence ${Math.round((item.confidence||0)*100)}%`,item.confidence>=0.7?'ok':'warn');
+    const ev=document.createElement('small');ev.textContent=item.evidence||'';
+    card.append(label,conf,ev);p.append(card);
+  });
+  if((brief.withheld_low_confidence||[]).length)p.append(note(`Withheld as too uncertain to state: ${brief.withheld_low_confidence.join(', ')}`));
+  root.append(p);
+
+  // The offer and why it was chosen.
+  const offer=brief.recommended_service||brief.recommended_product;
+  const rows=[['Recommended',offer?offer.name:'None'],['Kind',offer?offer.kind:'\u2014'],['Intent',brief.intent||'\u2014']];
+  if(offer&&offer.price_min_usd!=null)rows.push(['Catalogue range',`$${offer.price_min_usd} to $${offer.price_max_usd}`]);
+  else rows.push(['Pricing','Not yet available (pricing engine is Phase B)']);
+  (brief.scores?Object.entries(brief.scores):[]).forEach(([k,v])=>rows.push([k.replaceAll('_',' ').toLowerCase(),v==null?'unknown':v]));
+  root.append(intelSection('Recommendation',rows));
+
+  // Proof, with why it was selected and its relevance score.
+  const proof=brief.proof||[];
+  const pr=document.createElement('section');pr.className='intel-section';
+  const prh=document.createElement('h4');prh.textContent='Proof cited';pr.append(prh);
+  if(!proof.length)pr.append(note('No proof linked to this offer.'));
+  proof.forEach(item=>{
+    const card=document.createElement('div');card.className='evidence-card';
+    const b=document.createElement('b');b.textContent=item.name;
+    card.append(b,pill(`relevance ${item.relevance}`,'ok'));
+    const why=document.createElement('small');why.textContent=item.why||'';card.append(why);
+    const url=safeURL(item.url);
+    if(url){const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=item.url;card.append(a)}
+    pr.append(card);
+  });
+  root.append(pr);
+
+  (brief.blockers||[]).forEach(b=>root.append(note(b)));
+  root.append(intelSection('Generation',[['Provider',data.provider||'\u2014'],['Model',data.model||'\u2014'],['Tokens',`${data.input_tokens||0} in / ${data.output_tokens||0} out`],['AI cost',`$${(data.estimated_cost_usd||0).toFixed(4)}`]]));
 }
 
 function renderEvents(events){const root=$('activity-list');root.replaceChildren();if(!events.length){root.textContent='No activity yet.';return}events.forEach(item=>{const el=document.createElement('div');el.className='event';const label=document.createElement('span');label.textContent=item.event_type.replaceAll('.',' · ');const time=document.createElement('time');time.textContent=new Date(item.created_at).toLocaleString();el.append(label,time);root.append(el)})}

@@ -22,6 +22,9 @@ from winston.commercial import CommercialLedger
 from winston.signals import SignalStore, research_contact
 from winston.catalog import Catalog, CatalogValidationError, UnknownEntry
 from winston.fit import FitEngine
+from winston.writer import Writer
+from winston.guardian import Guardian
+from winston.pipeline import OutreachPipeline
 
 load_dotenv()
 
@@ -36,6 +39,10 @@ signal_store.initialize()
 catalog = Catalog(repository)
 catalog.initialize()
 fit_engine = FitEngine(repository, catalog, signal_store)
+writer = Writer(repository, catalog, signal_store, fit_engine, ai_service)
+guardian = Guardian(repository, catalog)
+pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
+pipeline.initialize()
 json_write_lock = threading.RLock()
 
 # ============================================================
@@ -203,14 +210,6 @@ PLACE_SEARCHES = [
 ]
 
 # Rotating subject lines
-EMAIL_SUBJECTS = [
-    "Your website could be working harder for you",
-    "Quick idea for {name}",
-    "More customers for {name} — here's how",
-    "Does {name} have a 24/7 AI assistant yet?",
-    "I noticed something about {name}'s website",
-    "This could save {name} 10 hours a week",
-]
 
 # In-memory state
 state = {
@@ -574,93 +573,32 @@ def find_contact_info(website_url: str) -> tuple[str, str, dict]:
 # ============================================================
 # DM MESSAGE WRITER — NEW
 # ============================================================
-def write_instagram_dm(business: dict) -> str:
-    """Generate a short, punchy Instagram DM for a business."""
-    try:
-        name     = business.get('name', 'there')
-        biz_type = business.get('type', 'business')
-        location = business.get('address', 'NYC')
-        ig       = business.get('instagram', '')
-        handle_line = f"Saw your page ({ig}) — " if ig else ""
-
-        prompt = f"""Write a short Instagram DM from YardLink Studio to {name}, a {biz_type} in {location}.
-
-{handle_line}YardLink Studio ({YARDLINK_IG}) is a NYC digital agency that builds modern websites and AI tools for small businesses.
-
-Rules:
-- Under 60 words
-- Casual and human — this is a DM, not a formal email
-- No emojis, no bullet points
-- One genuine compliment or observation about their business
-- One specific thing we could help with
-- End with a soft CTA: ask if they'd want to know more
-- Sign off: — Kevin @ {YARDLINK_IG}
-- Plain text only"""
-
-        return ai_service.generate(prompt, max_tokens=200, purpose="instagram_dm").text
-    except Exception as e:
-        log(f"DM write error: {e}")
-        return ""
-
-def write_facebook_dm(business: dict) -> str:
-    """Generate a short Facebook page DM."""
-    try:
-        name     = business.get('name', 'there')
-        biz_type = business.get('type', 'business')
-        location = business.get('address', 'NYC')
-
-        prompt = f"""Write a short Facebook Messenger message from YardLink Studio to {name}, a {biz_type} in {location}.
-
-YardLink Studio is a NYC digital agency (yardlinkstudio.com) that builds websites and AI tools for small businesses.
-
-Rules:
-- Under 70 words
-- Friendly and direct — this is a page message, not an email
-- Reference that we work specifically with {biz_type}s in NYC/Long Island
-- One specific value prop (e.g. AI chatbot that handles DMs/calls 24/7)
-- End with: "Would love to connect if you're open to it."
-- Sign: Kevin @ YardLink Studio
-- Plain text only, no emojis"""
-
-        return ai_service.generate(prompt, max_tokens=200, purpose="facebook_dm").text
-    except Exception as e:
-        log(f"FB DM write error: {e}")
-        return ""
+# ============================================================
+# SOCIAL DM GENERATORS - REMOVED 2026-08-23 (Phase A)
+# ============================================================
+# write_instagram_dm() and write_facebook_dm() were a second outreach generation
+# path carrying the same hardcoded agency blurb, and they never worked: 0 successes
+# across 120 attempts, because their 200-token budget was consumed entirely by the
+# reasoning block (see docs/ARCHITECTURE.md).
+#
+# Social lead capture is retained. Businesses with a social presence and no email
+# are still discovered and recorded, they simply arrive without a generated message.
+# The DM channel needs its own evidence-based Writer variant and, more importantly,
+# outcome tracking. Generating messages for a channel with no send path and no
+# measurement produces text nobody can learn from.
 
 # ============================================================
-# EMAIL WRITING
+# LEGACY OUTREACH GENERATOR - REMOVED 2026-08-23 (Phase A)
 # ============================================================
-def get_subject(business_name, index=0):
-    template = EMAIL_SUBJECTS[index % len(EMAIL_SUBJECTS)]
-    return template.replace("{name}", business_name)
-
-def write_email(business: dict) -> str:
-    try:
-        biz_name = business.get('name', 'there')
-        biz_type = business.get('type', 'business')
-        biz_location = business.get('address', 'NYC')
-
-        prompt = f"""Write a cold outreach email from YardLink Studio to {biz_name}, a {biz_type} in {biz_location}.
-
-YardLink Studio (yardlinkstudio.com) is a NYC digital agency that builds:
-- Fast, modern websites
-- AI chatbots that handle customer questions 24/7 (booking, FAQs, pricing)
-- Automated tools that save business owners hours every week
-
-Rules:
-- Under 130 words
-- Sound like a real person, not a marketing bot
-- Reference something specific about being a {biz_type} in {biz_location}
-- One clear pain point (e.g. missing calls after hours, outdated website, no online booking)
-- One specific solution we offer
-- End with: "Would you be open to a 15-minute call this week?"
-- Sign off: — The YardLink Studio Team | yardlinkstudio.com
-- Plain text only, no markdown, no bullet points"""
-
-        return ai_service.generate(prompt, max_tokens=400, purpose="email_draft").text
-    except Exception as e:
-        log(f"Email write error: {e}")
-        return ""
+# write_email() described YardLink from a hardcoded string and opened identically
+# to all 1,396 prospects: "a NYC digital agency that builds fast, modern websites,
+# AI chatbots, and automated tools". It knew nothing about the business it was
+# sent to, and ignored every signal, score, and catalogue entry Winston had.
+#
+# All outreach now runs through OutreachPipeline:
+#   research -> problems -> catalogue -> offer -> proof -> Writer -> Guardian -> draft
+# A second generation path is a regression; tests/test_production_pipeline.py
+# enforces that this function does not return.
 
 # ============================================================
 # EMAIL SENDING
@@ -881,14 +819,17 @@ def run_scan(searches):
             email_key = email.lower()
             if email and email_key not in emailed_keys and email_key not in queued_emails and email_quality_score(email) >= 3:
                 log(f"📧 Email lead: {name} — {email} (score: {email_quality_score(email)}/10)")
-                subject = get_subject(name, subject_index)
-                subject_index += 1
-                body = write_email(b)
-                if body:
-                    b["email"]   = email
-                    b["phone"]   = phone
-                    b["social"]  = social
-                    persist_draft(b, subject, body)
+                b["email"], b["phone"], b["social"] = email, phone, social
+                contact_id, _ = repository.upsert_contact(b, "scan")
+                # Research first: the Writer refuses to invent problems, so a prospect
+                # with no observations produces no draft rather than a generic one.
+                if b.get("website"):
+                    research_contact(repository, signal_store, contact_id, b["website"])
+                outcome = pipeline.generate(contact_id)
+                if outcome.reviewable:
+                    b.update({"contact_id": contact_id, "draft_id": outcome.draft_id,
+                              "subject": outcome.draft.subject, "draft": outcome.draft.body,
+                              "workflow_stage": "draft", "intent": outcome.draft.intent})
                     state["pending"].append(b)
                     queued_emails.add(email_key)
                     total_email_leads += 1
@@ -902,11 +843,7 @@ def run_scan(searches):
                 log(f"📱 Social lead: {name} — IG: {social.get('instagram','')} FB: {social.get('facebook','')}")
                 b["phone"]  = phone
                 b["social"] = social
-                dm_ig = write_instagram_dm(b) if social.get("instagram") else ""
-                dm_fb = write_facebook_dm(b) if social.get("facebook") else ""
-                if dm_ig or dm_fb:
-                    b["dm_ig"] = dm_ig
-                    b["dm_fb"] = dm_fb
+                if social.get("instagram") or social.get("facebook"):
                     social_leads.append({**b, "added_at": datetime.now().isoformat()})
                     social_handles_seen.add(b.get("place_id"))
                     save_social_leads(social_leads)
@@ -1000,18 +937,27 @@ def run_existing_contact_drafts(limit: int):
                 "tiktok": contact.get("tiktok", ""),
             },
         }
-        subject = get_subject(business["name"], progress["completed"])
-        body = write_email(business)
-        if not body:
+        # Research before writing. The Writer will not invent problems, so an
+        # unresearched prospect yields no draft rather than a generic one.
+        if business["website"] and not signal_store.last_researched(contact["id"]):
+            research_contact(repository, signal_store, contact["id"], business["website"])
+
+        outcome = pipeline.generate(contact["id"])
+        if not outcome.reviewable:
             progress["failed"] += 1
-            log(f"Local draft failed: {business['name']}")
+            progress.setdefault("skipped_reasons", {})
+            key = outcome.status
+            progress["skipped_reasons"][key] = progress["skipped_reasons"].get(key, 0) + 1
+            log(f"No draft for {business['name']}: {outcome.reason[:90]}")
             continue
-        draft_id = repository.create_draft(contact["id"], subject, body)
-        business.update({"subject": subject, "draft": body, "draft_id": draft_id,
-                         "workflow_stage": "draft"})
+
+        business.update({"subject": outcome.draft.subject, "draft": outcome.draft.body,
+                         "draft_id": outcome.draft_id, "workflow_stage": "draft",
+                         "intent": outcome.draft.intent})
         state["pending"].append(business)
         progress["completed"] += 1
-        log(f"Local draft ready: {business['name']} ({progress['completed']}/{len(candidates)})")
+        log(f"Draft ready: {business['name']} ({outcome.draft.intent}) "
+            f"{progress['completed']}/{len(candidates)}")
     state["status"] = "idle"
     log(f"Zero-cost batch complete: {progress['completed']} drafts, {progress['failed']} skipped/failed")
 
@@ -1030,665 +976,12 @@ def generate_csv() -> str:
     return output.getvalue()
 
 # ============================================================
-# HTML FRONTEND — upgraded with Social tab + CSV export
+# FRONTEND
 # ============================================================
-HTML = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Winston — YardLink Studio</title>
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Mono:wght@400;700&family=DM+Sans:ital,wght@0,300;0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg: #030303;
-  --surface: #0a0a0a;
-  --card: #111;
-  --card2: #141414;
-  --border: rgba(255,255,255,0.05);
-  --border2: rgba(255,255,255,0.09);
-  --green: #00FF87;
-  --green-dim: rgba(0,255,135,0.12);
-  --gold: #FFD100;
-  --gold-dim: rgba(255,209,0,0.1);
-  --red: #FF4D4D;
-  --red-dim: rgba(255,77,77,0.08);
-  --blue: #4D9FFF;
-  --blue-dim: rgba(77,159,255,0.08);
-  --purple: #B06AFF;
-  --purple-dim: rgba(176,106,255,0.1);
-  --white: #EDE8DF;
-  --gray: #444;
-  --dim: rgba(237,232,223,0.35);
-  --dim2: rgba(237,232,223,0.55);
-}
+# Served from templates/dashboard.html + static/. A large inline HTML
+# string also lived here, unreferenced since the template was introduced,
+# and still contained the removed DM preview markup.
 
-* { margin:0; padding:0; box-sizing:border-box; }
-html, body { height:100%; overflow:hidden; }
-
-body {
-  background: var(--bg);
-  color: var(--white);
-  font-family: 'DM Sans', sans-serif;
-  display: flex;
-  flex-direction: column;
-}
-
-body::before {
-  content:'';
-  position:fixed; inset:0;
-  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
-  pointer-events:none; z-index:9999;
-}
-
-header {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border2);
-  padding: 0 28px;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-shrink: 0;
-  position: relative;
-}
-header::after {
-  content:''; position:absolute; bottom:0; left:0; right:0; height:1px;
-  background: linear-gradient(90deg, transparent, var(--green), transparent);
-  opacity:0.3;
-}
-
-.header-left { display:flex; align-items:center; gap:14px; }
-.logo-mark {
-  width:40px; height:40px; border-radius:10px;
-  background: linear-gradient(135deg, #00FF87 0%, #00C060 100%);
-  display:flex; align-items:center; justify-content:center;
-  font-size:1.2rem;
-  box-shadow: 0 0 24px rgba(0,255,135,0.25), inset 0 1px 0 rgba(255,255,255,0.2);
-  animation: pulse-logo 4s ease-in-out infinite; flex-shrink:0;
-}
-@keyframes pulse-logo {
-  0%,100%{box-shadow:0 0 24px rgba(0,255,135,0.25),inset 0 1px 0 rgba(255,255,255,0.2);}
-  50%{box-shadow:0 0 40px rgba(0,255,135,0.45),inset 0 1px 0 rgba(255,255,255,0.2);}
-}
-.logo-text h1 { font-family:'Bebas Neue',sans-serif; font-size:1.35rem; letter-spacing:3px; color:var(--green); line-height:1; }
-.logo-text p  { font-size:0.62rem; color:var(--dim); letter-spacing:2px; text-transform:uppercase; }
-
-.header-center {
-  position:absolute; left:50%; transform:translateX(-50%);
-  display:flex; align-items:center; gap:16px;
-}
-.stat-pill {
-  display:flex; align-items:center; gap:8px;
-  background:var(--card); border:1px solid var(--border2);
-  border-radius:100px; padding:5px 14px 5px 10px;
-}
-.stat-pill-icon { font-size:0.85rem; }
-.stat-pill-info { display:flex; flex-direction:column; line-height:1; }
-.stat-pill-num  { font-family:'Bebas Neue',sans-serif; font-size:1.1rem; color:var(--gold); line-height:1.1; }
-.stat-pill-label{ font-size:0.58rem; color:var(--dim); letter-spacing:1px; text-transform:uppercase; }
-
-.status-badge {
-  display:flex; align-items:center; gap:8px;
-  background:var(--green-dim); border:1px solid rgba(0,255,135,0.2);
-  padding:5px 14px; border-radius:100px;
-  font-size:0.7rem; font-weight:700; letter-spacing:1.5px; text-transform:uppercase; color:var(--green);
-}
-.status-dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:blink 1.4s ease-in-out infinite; }
-@keyframes blink{0%,100%{opacity:1;}50%{opacity:0.2;}}
-
-.main { display:grid; grid-template-columns:300px 1fr 300px; flex:1; overflow:hidden; }
-.panel { display:flex; flex-direction:column; overflow:hidden; border-right:1px solid var(--border); }
-.panel:last-child { border-right:none; border-left:1px solid var(--border); }
-
-.panel-header {
-  padding:12px 16px; border-bottom:1px solid var(--border);
-  display:flex; align-items:center; justify-content:space-between;
-  flex-shrink:0; background:var(--surface);
-}
-.panel-title { font-family:'Bebas Neue',sans-serif; font-size:0.85rem; letter-spacing:3px; color:var(--dim2); }
-.panel-badge {
-  font-family:'Space Mono',monospace; font-size:0.65rem; font-weight:700;
-  padding:2px 9px; border-radius:100px;
-  background:var(--green-dim); border:1px solid rgba(0,255,135,0.2); color:var(--green);
-}
-.panel-badge.gold { background:var(--gold-dim); border-color:rgba(255,209,0,0.2); color:var(--gold); }
-.panel-badge.purple { background:var(--purple-dim); border-color:rgba(176,106,255,0.2); color:var(--purple); }
-
-.panel-body { flex:1; overflow-y:auto; padding:10px; }
-.panel-body::-webkit-scrollbar { width:2px; }
-.panel-body::-webkit-scrollbar-thumb { background:rgba(0,255,135,0.15); border-radius:2px; }
-
-.lead-card {
-  background:var(--card); border:1px solid var(--border);
-  border-radius:10px; padding:12px; margin-bottom:8px;
-  transition:all 0.2s; position:relative; overflow:hidden;
-}
-.lead-card::before {
-  content:''; position:absolute; left:0; top:0; bottom:0; width:3px;
-  background:var(--green); border-radius:3px 0 0 3px;
-  opacity:0; transition:opacity 0.2s;
-}
-.lead-card.social-card::before { background:var(--purple); }
-.lead-card:hover { border-color:var(--border2); }
-.lead-card:hover::before { opacity:1; }
-
-.lead-name   { font-weight:700; font-size:0.84rem; margin-bottom:3px; }
-.lead-email  { font-family:'Space Mono',monospace; font-size:0.64rem; color:var(--green); margin-bottom:3px; }
-.lead-phone  { font-family:'Space Mono',monospace; font-size:0.64rem; color:var(--gold); margin-bottom:3px; }
-.lead-social { font-size:0.64rem; color:var(--purple); margin-bottom:3px; }
-.lead-meta   { font-size:0.65rem; color:var(--dim); margin-bottom:8px; }
-.lead-subject{ font-size:0.68rem; color:var(--gold); margin-bottom:6px; font-style:italic; }
-.email-score { font-size:0.6rem; color:var(--dim); }
-.score-high  { color:var(--green); }
-.score-mid   { color:var(--gold); }
-.score-low   { color:var(--red); }
-
-.email-preview {
-  background:rgba(0,255,135,0.03); border:1px solid rgba(0,255,135,0.08);
-  border-radius:6px; padding:8px 10px;
-  font-size:0.7rem; color:var(--dim); line-height:1.55; margin-bottom:8px;
-  max-height:80px; overflow:hidden; cursor:pointer; transition:max-height 0.3s;
-}
-.email-preview.expanded { max-height:300px; overflow-y:auto; }
-.email-preview:hover { border-color:rgba(0,255,135,0.15); }
-.dm-preview {
-  background:rgba(176,106,255,0.04); border:1px solid rgba(176,106,255,0.12);
-  border-radius:6px; padding:8px 10px;
-  font-size:0.7rem; color:var(--dim); line-height:1.55; margin-bottom:4px;
-  max-height:80px; overflow:hidden; cursor:pointer; transition:max-height 0.3s;
-}
-.dm-preview.expanded { max-height:200px; overflow-y:auto; }
-.dm-label { font-size:0.6rem; color:var(--purple); margin-bottom:2px; letter-spacing:1px; text-transform:uppercase; }
-
-.lead-actions { display:flex; gap:6px; }
-.btn-approve {
-  flex:1; padding:6px; border-radius:6px; border:none;
-  font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
-  background:var(--green-dim); border:1px solid rgba(0,255,135,0.25); color:var(--green);
-}
-.btn-approve:hover { background:rgba(0,255,135,0.22); transform:scale(1.02); }
-.btn-reject {
-  flex:1; padding:6px; border-radius:6px; border:none;
-  font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
-  background:var(--red-dim); border:1px solid rgba(255,77,77,0.2); color:var(--red);
-}
-.btn-reject:hover { background:rgba(255,77,77,0.15); }
-
-.sent-card {
-  background:var(--card); border:1px solid var(--border);
-  border-radius:8px; padding:10px 12px; margin-bottom:6px;
-  display:flex; align-items:center; gap:10px;
-}
-.sent-dot { width:7px; height:7px; border-radius:50%; background:var(--green); flex-shrink:0; }
-.sent-dot.followup { background:var(--blue); }
-.sent-info { flex:1; min-width:0; }
-.sent-name  { font-size:0.78rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.sent-email { font-family:'Space Mono',monospace; font-size:0.6rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.sent-date  { font-size:0.6rem; color:var(--dim); flex-shrink:0; }
-
-.center-panel { display:flex; flex-direction:column; overflow:hidden; }
-
-.controls {
-  padding:10px 16px; border-bottom:1px solid var(--border);
-  display:flex; gap:8px; flex-shrink:0; background:var(--surface); flex-wrap:wrap;
-}
-.ctrl-btn {
-  flex:1; padding:9px; border-radius:7px; border:1px solid var(--border2);
-  background:var(--card); color:var(--white);
-  font-family:'DM Sans',sans-serif; font-size:0.72rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
-  min-width:80px;
-}
-.ctrl-btn:hover { background:var(--card2); border-color:rgba(255,255,255,0.12); }
-.ctrl-btn.green { border-color:rgba(0,255,135,0.3); color:var(--green); }
-.ctrl-btn.green:hover { background:var(--green-dim); }
-.ctrl-btn.red { border-color:rgba(255,77,77,0.3); color:var(--red); }
-.ctrl-btn.red:hover { background:var(--red-dim); }
-.ctrl-btn.gold { border-color:rgba(255,209,0,0.3); color:var(--gold); }
-.ctrl-btn.gold:hover { background:var(--gold-dim); }
-.ctrl-btn.purple { border-color:rgba(176,106,255,0.3); color:var(--purple); }
-.ctrl-btn.purple:hover { background:var(--purple-dim); }
-
-.chat-area { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px; }
-.chat-area::-webkit-scrollbar { width:2px; }
-.chat-area::-webkit-scrollbar-thumb { background:rgba(0,255,135,0.12); }
-
-.msg { display:flex; gap:10px; animation:msgIn 0.25s ease both; }
-@keyframes msgIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-.msg-av {
-  width:30px; height:30px; border-radius:50%; flex-shrink:0;
-  display:flex; align-items:center; justify-content:center; font-size:0.85rem;
-  background:linear-gradient(135deg, #00FF87, #00A854);
-  box-shadow:0 0 12px rgba(0,255,135,0.2);
-}
-.msg-user .msg-av { background:linear-gradient(135deg, #FFD100, #FF9500); order:2; }
-.msg-bubble {
-  background:var(--card); border:1px solid var(--border);
-  border-radius:14px; border-bottom-left-radius:3px;
-  padding:10px 14px; font-size:0.84rem; line-height:1.6; max-width:82%;
-}
-.msg-user .msg-bubble {
-  background:rgba(255,209,0,0.07); border-color:rgba(255,209,0,0.12);
-  border-bottom-left-radius:14px; border-bottom-right-radius:3px; margin-left:auto;
-}
-.msg-user { flex-direction:row-reverse; }
-
-.chat-input-row {
-  border-top:1px solid var(--border); padding:12px 16px;
-  display:flex; gap:10px; align-items:center; flex-shrink:0; background:var(--surface);
-}
-.chat-inp {
-  flex:1; background:var(--card); border:1px solid var(--border2);
-  border-radius:10px; padding:10px 14px; color:var(--white);
-  font-family:'DM Sans',sans-serif; font-size:0.84rem; outline:none; transition:border-color 0.2s;
-}
-.chat-inp:focus { border-color:rgba(0,255,135,0.35); }
-.chat-inp::placeholder { color:var(--gray); }
-.send-btn {
-  width:40px; height:40px; border-radius:50%;
-  background:var(--green); border:none; cursor:pointer;
-  display:flex; align-items:center; justify-content:center; transition:all 0.15s; flex-shrink:0;
-}
-.send-btn:hover { background:var(--gold); transform:scale(1.06); }
-
-.log-entry {
-  font-family:'Space Mono',monospace; font-size:0.62rem; color:var(--dim);
-  padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.02); line-height:1.5; word-break:break-word;
-}
-.log-entry.win  { color:var(--green); }
-.log-entry.info { color:var(--blue); opacity:0.8; }
-.log-entry.social { color:var(--purple); }
-
-.tabs { display:flex; gap:0; border-bottom:1px solid var(--border); flex-shrink:0; background:var(--surface); }
-.tab-btn {
-  flex:1; padding:9px; background:none; border:none;
-  font-family:'DM Sans',sans-serif; font-size:0.7rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase; color:var(--dim); cursor:pointer;
-  border-bottom:2px solid transparent; transition:all 0.15s;
-}
-.tab-btn.active { color:var(--green); border-bottom-color:var(--green); }
-.tab-btn.active.social-tab { color:var(--purple); border-bottom-color:var(--purple); }
-
-.tab-panel { display:none; flex:1; overflow:hidden; flex-direction:column; }
-.tab-panel.active { display:flex; }
-
-.empty { text-align:center; padding:40px 20px; color:var(--gray); font-size:0.78rem; line-height:1.8; }
-.empty-icon { font-size:2rem; margin-bottom:10px; display:block; opacity:0.5; }
-
-.approve-strip {
-  margin:0 0 10px; padding:8px 12px;
-  background:var(--green-dim); border:1px solid rgba(0,255,135,0.15);
-  border-radius:8px; display:flex; align-items:center; justify-content:space-between;
-  font-size:0.72rem; color:var(--green);
-}
-.approve-all-btn {
-  background:var(--green); color:#000; border:none; border-radius:5px;
-  padding:4px 12px; font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
-}
-.approve-all-btn:hover { background:#00e07a; }
-</style>
-</head>
-<body>
-
-<header>
-  <div class="header-left">
-    <div class="logo-mark">W</div>
-    <div class="logo-text">
-      <h1>WINSTON</h1>
-      <p>YardLink Studio · Outreach Engine</p>
-    </div>
-  </div>
-  <div class="header-center">
-    <div class="stat-pill">
-      <span class="stat-pill-icon">📤</span>
-      <div class="stat-pill-info">
-        <span class="stat-pill-num" id="emails-sent">0</span>
-        <span class="stat-pill-label">Sent</span>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-pill-icon">🎯</span>
-      <div class="stat-pill-info">
-        <span class="stat-pill-num" id="leads-count">0</span>
-        <span class="stat-pill-label">Contacts</span>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-pill-icon">📱</span>
-      <div class="stat-pill-info">
-        <span class="stat-pill-num" id="social-count">0</span>
-        <span class="stat-pill-label">Social Leads</span>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <span class="stat-pill-icon">📬</span>
-      <div class="stat-pill-info">
-        <span class="stat-pill-num" id="followups-sent">0</span>
-        <span class="stat-pill-label">Follow-ups</span>
-      </div>
-    </div>
-  </div>
-  <div class="status-badge">
-    <div class="status-dot"></div>
-    <span id="status-text">Online</span>
-  </div>
-</header>
-
-<div class="main">
-
-  <!-- LEFT PANEL: EMAIL LEADS -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-title">Email Leads</span>
-      <span class="panel-badge" id="email-badge">0</span>
-    </div>
-    <div class="panel-body" id="leads-panel">
-      <div class="empty"><span class="empty-icon">🎯</span>Run a scan to find leads.</div>
-    </div>
-  </div>
-
-  <!-- CENTER PANEL: CHAT + CONTROLS -->
-  <div class="center-panel">
-    <div class="controls">
-      <button class="ctrl-btn green" onclick="startScan()">▶ Scan</button>
-      <button class="ctrl-btn red"   onclick="stopScan()">■ Stop</button>
-      <button class="ctrl-btn gold"  onclick="runFollowups()">↩ Follow-ups</button>
-      <button class="ctrl-btn purple" onclick="exportCSV()">⬇ Export CSV</button>
-    </div>
-
-    <div class="tabs">
-      <button class="tab-btn active" onclick="switchTab('chat', this)">💬 Winston</button>
-      <button class="tab-btn"        onclick="switchTab('sent', this)">📤 Sent</button>
-      <button class="tab-btn social-tab" onclick="switchTab('social', this)">📱 Social DMs</button>
-      <button class="tab-btn"        onclick="switchTab('log', this)">🔍 Log <span id="log-count" style="font-size:0.6rem;opacity:0.6"></span></button>
-    </div>
-
-    <!-- CHAT TAB -->
-    <div class="tab-panel active" id="tab-chat">
-      <div class="chat-area" id="chat-area">
-        <div class="msg">
-          <div class="msg-av">W</div>
-          <div class="msg-bubble">
-            Yo Kevin. Winston's upgraded — now tracking emails, social handles, AND phone numbers. Every lead goes into the contacts DB. Export to CSV any time. Let's get it.
-          </div>
-        </div>
-      </div>
-      <div class="chat-input-row">
-        <input class="chat-inp" id="chat-inp" placeholder="Ask Winston anything..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button class="send-btn" onclick="sendChat()">→</button>
-      </div>
-    </div>
-
-    <!-- SENT TAB -->
-    <div class="tab-panel" id="tab-sent">
-      <div class="panel-body" id="sent-panel">
-        <div class="empty"><span class="empty-icon">📤</span>No emails sent yet.</div>
-      </div>
-    </div>
-
-    <!-- SOCIAL DMS TAB -->
-    <div class="tab-panel" id="tab-social">
-      <div style="padding:8px 12px;background:rgba(176,106,255,0.06);border-bottom:1px solid rgba(176,106,255,0.12);font-size:0.7rem;color:var(--purple);flex-shrink:0;">
-        📱 These businesses have no email — outreach via Instagram/Facebook DM manually. Copy the message and send from <strong>@yardlinkstudio</strong>.
-      </div>
-      <div class="panel-body" id="social-panel">
-        <div class="empty"><span class="empty-icon">📱</span>Social leads will appear here after scanning.</div>
-      </div>
-    </div>
-
-    <!-- LOG TAB -->
-    <div class="tab-panel" id="tab-log">
-      <div class="panel-body" id="log-panel">
-        <div class="empty"><span class="empty-icon">📋</span>Waiting for activity...</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- RIGHT PANEL: SENT HISTORY + CONTACTS -->
-  <div class="panel">
-    <div class="panel-header">
-      <span class="panel-title">Contacted</span>
-      <span class="panel-badge gold" id="sent-badge">0</span>
-    </div>
-    <div class="panel-body" id="right-sent-panel">
-      <div class="empty"><span class="empty-icon">📬</span>Nobody contacted yet.</div>
-    </div>
-  </div>
-
-</div>
-
-<script>
-let pendingLeads = [];
-let sentLeads    = [];
-let socialLeads  = [];
-
-function escapeHTML(value) {
-  const span = document.createElement('span');
-  span.textContent = value == null ? '' : String(value);
-  return span.innerHTML;
-}
-
-function switchTab(name, btn) {
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-' + name).classList.add('active');
-  btn.classList.add('active');
-}
-
-function togglePreview(el) { el.classList.toggle('expanded'); }
-
-async function sendChat() {
-  const inp = document.getElementById('chat-inp');
-  const msg = inp.value.trim();
-  if (!msg) return;
-  inp.value = '';
-  appendMsg(msg, 'user');
-  const res  = await fetch('/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
-  const data = await res.json();
-  appendMsg(data.reply, 'winston');
-}
-
-function appendMsg(text, who) {
-  const area = document.getElementById('chat-area');
-  const div  = document.createElement('div');
-  div.className = 'msg' + (who === 'user' ? ' msg-user' : '');
-  div.innerHTML = `<div class="msg-av">${who==='user'?'K':'W'}</div><div class="msg-bubble">${escapeHTML(text)}</div>`;
-  area.appendChild(div);
-  area.scrollTop = area.scrollHeight;
-}
-
-async function startScan() {
-  await fetch('/scan', {method:'POST'});
-  appendMsg('Scan started. Finding leads across NYC and Long Island.', 'winston');
-}
-
-async function stopScan() {
-  await fetch('/stop', {method:'POST'});
-  appendMsg('Scan stopped.', 'winston');
-}
-
-async function runFollowups() {
-  const res  = await fetch('/followups', {method:'POST'});
-  const data = await res.json();
-  appendMsg(`Follow-ups checked. ${data.sent} sent today.`, 'winston');
-}
-
-async function exportCSV() {
-  appendMsg('Exporting contacts to CSV...', 'winston');
-  window.location.href = '/export_csv';
-}
-
-function scoreClass(score) {
-  if (score >= 8) return 'score-high';
-  if (score >= 5) return 'score-mid';
-  return 'score-low';
-}
-
-async function approveLead(i) {
-  const res  = await fetch('/approve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
-  const data = await res.json();
-  if (data.success) {
-    appendMsg(`Draft for ${data.name} approved. It has not been sent.`, 'winston');
-    refreshLeads();
-  }
-}
-
-async function rejectLead(i) {
-  await fetch('/reject', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
-  refreshLeads();
-}
-
-async function approveAll() {
-  const res  = await fetch('/approve_all', {method:'POST'});
-  const data = await res.json();
-  appendMsg(`Approved ${data.approved} drafts. Nothing was sent.`, 'winston');
-  refreshLeads();
-}
-
-async function refreshLeads() {
-  const res  = await fetch('/leads');
-  const data = await res.json();
-  pendingLeads = data.leads;
-  document.getElementById('email-badge').textContent  = pendingLeads.length;
-  document.getElementById('leads-count').textContent  = data.total_found;
-
-  const panel = document.getElementById('leads-panel');
-  if (pendingLeads.length === 0) {
-    panel.innerHTML = \'<div class="empty"><span class="empty-icon">🎯</span>No email leads queued.</div>\';
-    return;
-  }
-  const strip = pendingLeads.length > 1
-    ? `<div class="approve-strip"><span>${pendingLeads.length} leads ready</span><button class="approve-all-btn" onclick="approveAll()">Approve All</button></div>`
-    : \'\';
-  const html = strip + pendingLeads.map((b,i) => {
-    const score = b.email_score || 0;
-    const social = b.social || {};
-    const socialLine = [
-      social.instagram ? `IG: @${social.instagram}` : \'\',
-      social.facebook  ? `FB: ${social.facebook}` : \'\',
-    ].filter(Boolean).join(' · ');
-    return `
-    <div class="lead-card">
-      <div class="lead-name">${escapeHTML(b.name)}</div>
-      ${b.email ? `<div class="lead-email">${escapeHTML(b.email)} <span class="email-score ${scoreClass(score)}">(${score}/10)</span></div>` : \'\'}
-      ${b.phone ? `<div class="lead-phone">📞 ${escapeHTML(b.phone)}</div>` : \'\'}
-      ${socialLine ? `<div class="lead-social">📱 ${escapeHTML(socialLine)}</div>` : \'\'}
-      <div class="lead-meta">${escapeHTML(b.type || \'Business\')} · ${escapeHTML(b.address || \'NYC\')}</div>
-      ${b.subject ? `<div class="lead-subject">📧 "${escapeHTML(b.subject)}"</div>` : \'\'}
-      <div class="email-preview" onclick="togglePreview(this)">${escapeHTML(b.draft || \'Drafting...\')}</div>
-      <div class="lead-actions">
-        <button class="btn-approve" onclick="approveLead(${i})">✓ Approve</button>
-        <button class="btn-reject"  onclick="rejectLead(${i})">✗ Skip</button>
-      </div>
-    </div>`;
-  }).join(\'\');
-  panel.innerHTML = html;
-}
-
-async function refreshSocial() {
-  const res  = await fetch('/social_leads?limit=100');
-  const data = await res.json();
-  socialLeads = data.leads;
-  document.getElementById('social-count').textContent = data.total;
-
-  const panel = document.getElementById('social-panel');
-  if (socialLeads.length === 0) {
-    panel.innerHTML = \'<div class="empty"><span class="empty-icon">📱</span>Social leads will appear here after scanning.</div>\';
-    return;
-  }
-  panel.innerHTML = socialLeads.map(b => {
-    const social = b.social || {};
-    const ig     = social.instagram ? `@${social.instagram}` : \'\';
-    const fb     = social.facebook  ? social.facebook : \'\';
-    return `
-    <div class="lead-card social-card">
-      <div class="lead-name">${escapeHTML(b.name)}</div>
-      ${ig ? `<div class="lead-social">📸 ${escapeHTML(ig)}</div>` : \'\'}
-      ${fb ? `<div class="lead-social">👥 fb.com/${escapeHTML(fb)}</div>` : \'\'}
-      ${b.phone ? `<div class="lead-phone">📞 ${escapeHTML(b.phone)}</div>` : \'\'}
-      <div class="lead-meta">${escapeHTML(b.type || \'Business\')} · ${escapeHTML(b.address || \'NYC\')}</div>
-      ${b.dm_ig ? `<div class="dm-label">IG DM</div><div class="dm-preview" onclick="togglePreview(this)">${escapeHTML(b.dm_ig)}</div>` : \'\'}
-      ${b.dm_fb ? `<div class="dm-label">FB Message</div><div class="dm-preview" onclick="togglePreview(this)">${escapeHTML(b.dm_fb)}</div>` : \'\'}
-    </div>`;
-  }).join(\'\');
-}
-
-async function refreshSent() {
-  const res  = await fetch('/sent?limit=100');
-  const data = await res.json();
-  sentLeads  = data.sent;
-  document.getElementById('emails-sent').textContent   = data.total_sent;
-  document.getElementById('followups-sent').textContent = data.total_followups;
-  document.getElementById('sent-badge').textContent    = data.total_sent;
-
-  const panels = [document.getElementById('sent-panel'), document.getElementById('right-sent-panel')];
-  if (sentLeads.length === 0) {
-    panels.forEach(p => { if(p) p.innerHTML = \'<div class="empty"><span class="empty-icon">📤</span>No emails sent yet.</div>\'; });
-    return;
-  }
-  const html = sentLeads.slice().reverse().map(s => `
-    <div class="sent-card">
-      <div class="sent-dot ${s.followup_sent ? \'followup\' : \'\'}"></div>
-      <div class="sent-info">
-        <div class="sent-name">${escapeHTML(s.name)}</div>
-        <div class="sent-email">${escapeHTML(s.email)}</div>
-      </div>
-      <div class="sent-date">${s.sent_date ? s.sent_date.substring(0,10) : \'\'}</div>
-    </div>
-  `).join(\'\');
-  panels.forEach(p => { if(p) p.innerHTML = html; });
-}
-
-async function refreshLog() {
-  const res  = await fetch('/log');
-  const data = await res.json();
-  document.getElementById('log-count').textContent = data.log.length;
-  const panel = document.getElementById('log-panel');
-  if (data.log.length === 0) {
-    panel.innerHTML = \'<div class="empty"><span class="empty-icon">📋</span>Waiting for activity...</div>\';
-    return;
-  }
-  panel.innerHTML = data.log.slice(-80).reverse().map(l => {
-    let cls = \'\';
-    if (l.includes(\'📧\') || l.includes(\'sent\') || l.includes(\'🔥\')) cls = \'win\';
-    else if (l.includes(\'📱\') || l.includes(\'Social\')) cls = \'social\';
-    else if (l.includes(\'📬\') || l.includes(\'Found\') || l.includes(\'Scanning\')) cls = \'info\';
-    return `<div class="log-entry ${cls}">${escapeHTML(l)}</div>`;
-  }).join(\'\');
-}
-
-async function refreshStatus() {
-  const res  = await fetch('/status');
-  const data = await res.json();
-  document.getElementById('status-text').textContent = data.status === \'scanning\' ? \'Scanning...\' : \'Online\';
-  document.querySelector('.status-dot').style.background = data.status === \'scanning\' ? \'#FFD100\' : \'var(--green)\';
-}
-
-function refreshAll() {
-  refreshLeads();
-  refreshSent();
-  refreshSocial();
-  refreshLog();
-  refreshStatus();
-}
-
-refreshAll();
-setInterval(() => {
-  refreshLeads();
-  refreshLog();
-  refreshStatus();
-}, 2500);
-setInterval(() => {
-  refreshSent();
-  refreshSocial();
-}, 15000);
-</script>
-</body>
-</html>'''
 
 # ============================================================
 # ROUTES
@@ -1925,6 +1218,31 @@ def run_followups():
         "error": "The legacy follow-up sender was permanently removed. All sending must go "
                  "through the draft/approve/queue/confirm state machine.",
     }), 410
+
+@app.route('/drafts/<draft_id>/intelligence')
+def draft_intelligence(draft_id):
+    """The full reasoning chain behind one draft, for human review."""
+    record = pipeline.intelligence_for(draft_id)
+    if record is None:
+        return jsonify({"error": "No intelligence recorded for that draft"}), 404
+    draft = repository.get_draft(draft_id)
+    return jsonify({**record, "draft": dict(draft) if draft else None})
+
+
+@app.route('/drafts/blocked')
+def blocked_drafts():
+    """Drafts Guardian refused. Visible rather than silently discarded."""
+    return jsonify({"blocked": pipeline.blocked(), "stats": pipeline.stats()})
+
+
+@app.route('/prospects/<contact_id>/generate', methods=['POST'])
+def generate_draft(contact_id):
+    """Run one prospect through the production pipeline."""
+    try:
+        return jsonify(pipeline.generate(contact_id).as_dict())
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+
 
 @app.route('/catalog')
 def catalog_list():

@@ -120,34 +120,118 @@ def strip_em_dashes(text: str) -> str:
     return re.sub(r",\s*,", ",", text)
 
 
-def select_proof(catalog: Catalog, offer_slug: str, industry: str,
-                 limit: int = MAX_PROOF) -> list[dict[str, Any]]:
-    """Pick the strongest evidence, not every project YardLink has ever built.
+def score_proof(entry: dict[str, Any], *, industry: str, offer: dict[str, Any],
+                problem_codes: set[str], explicitly_linked: bool = False) -> tuple[float, list[str]]:
+    """Relevance of one piece of evidence to this specific opportunity.
 
-    Linked proof for the recommended offer ranks first. Standing in the prospect's
-    own industry ranks next, because a restaurant recognising YardLink Eats carries
-    more weight than a generic capability claim.
+    Deliberately general. Nothing here privileges a particular project; YardLink Eats
+    outranks Anansi for a restaurant because it carries that industry in its strategic
+    segments, not because it is named in a special case. A data-engineering prospect
+    would invert the ordering through the same arithmetic.
     """
-    chosen: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    if not entry.get("verified"):
+        return 0.0, ["unverified, cannot be cited"]
 
-    # Standing in the prospect's own industry is evaluated FIRST. A restaurant owner
-    # recognising YardLink Eats carries more weight than a generic capability claim,
-    # and an earlier version buried it behind whichever proof happened to be linked.
-    for entry in catalog.strategic_proof_for(industry):
-        chosen.append({"slug": entry["slug"], "name": entry["name"],
-                       "description": entry.get("description", ""),
-                       "why": f"already active in the {industry} market"})
-        seen.add(entry["slug"])
+    score, reasons = 0.0, []
+    # A curated `proves` link is a human asserting relevance. Without this baseline a
+    # website offer scored zero proof, because no portfolio entry happens to contain
+    # the literal word "website" even though three were deliberately linked to it.
+    if explicitly_linked:
+        score += 0.3
+        reasons.append("linked as proof for this offer")
 
+    segments = {str(s).casefold() for s in (entry.get("strategic_segments") or [])}
+    industries = {str(s).casefold() for s in (entry.get("industries") or [])}
+    capabilities = {str(c).casefold() for c in (entry.get("capabilities") or [])}
+    blob = " ".join(capabilities | {str(entry.get("description", "")).casefold()})
+
+    # Standing in the prospect's own industry is the strongest signal a prospect
+    # can personally recognise.
+    if industry and industry in segments:
+        score += 0.5
+        reasons.append(f"already active in the {industry} market")
+    elif industry and industry in industries:
+        score += 0.35
+        reasons.append(f"built for {industry} businesses")
+    elif industry:
+        head = industry.split()[-1] if industry.split() else ""
+        if head and any(head in seg for seg in segments | industries):
+            score += 0.2
+            reasons.append(f"adjacent to the {industry} market")
+
+    # Capability overlap with what is actually being offered.
+    offer_terms = {str(t).casefold() for t in (offer.get("capabilities") or [])}
+    offer_terms |= {w for w in str(offer.get("name", "")).casefold().split() if len(w) > 3}
+    overlap = [term for term in offer_terms if term and term in blob]
+    if overlap:
+        score += min(0.3, 0.1 * len(overlap))
+        reasons.append(f"demonstrates {overlap[0]}")
+
+    # Evidence that speaks to the observed problem domain.
+    problem_words = {word for code in problem_codes for word in code.split("_") if len(word) > 3}
+    if any(word in blob for word in problem_words):
+        score += 0.15
+        reasons.append("addresses the same problem area")
+
+    return round(min(score, 1.0), 3), reasons
+
+
+def select_proof(catalog: Catalog, offer: dict[str, Any], industry: str,
+                 problem_codes: set[str] | None = None,
+                 limit: int = MAX_PROOF) -> list[dict[str, Any]]:
+    """Rank every citable entry by relevance and return the strongest.
+
+    An earlier version appended linked proof in database order, which put Anansi
+    ahead of YardLink Eats for a restaurant purely because of insertion sequence.
+    """
+    offer_slug = offer.get("slug", "")
+    problem_codes = problem_codes or set()
+
+    candidates: dict[str, dict[str, Any]] = {}
     for entry in catalog.proof_for(offer_slug):
-        if entry["slug"] not in seen:
-            chosen.append({"slug": entry["slug"], "name": entry["name"],
-                           "description": entry.get("description", ""),
-                           "why": "demonstrates the capability behind this offer"})
-            seen.add(entry["slug"])
+        candidates[entry["slug"]] = entry
+    for entry in catalog.strategic_proof_for(industry):
+        candidates.setdefault(entry["slug"], entry)
 
-    return chosen[:limit]
+    linked = {e["slug"] for e in catalog.proof_for(offer_slug)}
+    ranked = []
+    for entry in candidates.values():
+        score, reasons = score_proof(entry, industry=industry, offer=offer,
+                                     problem_codes=problem_codes,
+                                     explicitly_linked=entry["slug"] in linked)
+        if score <= 0:
+            continue
+        ranked.append({
+            "slug": entry["slug"], "name": entry["name"],
+            "description": entry.get("description", ""),
+            "url": entry.get("url", ""), "kind": entry["kind"],
+            "relevance": score,
+            "why": reasons[0] if reasons else "related capability",
+            "reasons": reasons,
+        })
+
+    ranked.sort(key=lambda r: -r["relevance"])
+    return ranked[:limit]
+
+
+def rank_problems(problems: list[Any], offer: dict[str, Any]) -> list[Any]:
+    """Order observations by relevance to the offer being made.
+
+    The opening line of the email is whichever problem lands first, so an ordering
+    offer that opened by discussing mobile layout was not a wording issue. It was
+    this list being unsorted.
+    """
+    solved = {str(p).casefold() for p in (offer.get("problems_solved") or [])}
+
+    def relevance(problem: Any) -> tuple[float, float, float]:
+        code_text = problem.code.replace("_", " ").casefold()
+        label_text = problem.label.casefold()
+        direct = any(code_text == s or code_text in s or s in code_text for s in solved)
+        loose = any(word in label_text for s in solved for word in s.split() if len(word) > 3)
+        addressed = 2.0 if direct else (1.0 if loose else 0.0)
+        return (-addressed, -problem.severity * problem.confidence, -problem.confidence)
+
+    return sorted(problems, key=relevance)
 
 
 class Writer:
@@ -182,19 +266,25 @@ class Writer:
         withheld = [p.code for p in assessment.problems if p.confidence < self.confidence_floor]
 
         offer = assessment.recommended_service or assessment.recommended_product
-        intent, lead_code = "", ""
-        codes = {p.code for p in usable}
+
+        # Problems are ordered by how directly the chosen offer addresses them, so the
+        # email opens on the problem the offer actually solves.
+        if offer:
+            full_offer = self.catalog.get(offer["slug"]) or offer
+            usable = rank_problems(usable, full_offer)
+        else:
+            full_offer = {}
+            usable.sort(key=lambda p: -(p.severity * p.confidence))
+
+        intent = ""
+        lead = usable[0].code if usable else ""
         for code, label in INTENT_BY_PROBLEM:
-            if code in codes:
-                intent, lead_code = label, code
+            if code == lead:
+                intent = label
                 break
 
-        # The email must open on the problem that set the intent. Left unsorted, the
-        # model led with whichever observation happened to be first, so an "ordering
-        # opportunity" email opened by talking about mobile layout.
-        usable.sort(key=lambda p: (p.code != lead_code, -p.severity))
-
-        proof = select_proof(self.catalog, offer["slug"], industry) if offer else []
+        proof = select_proof(self.catalog, full_offer, industry,
+                             {p.code for p in usable}) if offer else []
 
         return {
             "contact_id": contact_id,
