@@ -29,6 +29,7 @@ from winston.pricing import PricingEngine, NoPricingBasis
 from winston.ratecard import RateCard
 from winston.providers import ProviderRegistry
 from winston.costs import BudgetGuard
+from winston.fulfillment import FulfilmentBridge, NotBuilderFulfilled
 
 load_dotenv()
 
@@ -49,6 +50,8 @@ pricing_engine = PricingEngine(repository, catalog, rate_card)
 budget_guard = BudgetGuard(repository)
 budget_guard.initialize()
 provider_registry = ProviderRegistry(repository, ai_service, budget_guard)
+fulfilment = FulfilmentBridge(repository, catalog, signal_store, fit_engine)
+fulfilment.initialize()
 writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
@@ -1473,6 +1476,54 @@ def run_bulk_research(limit: int) -> None:
             f"{progress['unreachable']} unreachable, {progress['failed']} failed")
     finally:
         progress["running"] = False
+
+
+@app.route('/projects')
+def projects_list():
+    """Sold engagements and their operator-reported status."""
+    return jsonify({"projects": fulfilment.projects(), "status": fulfilment.status()})
+
+
+@app.route('/prospects/<contact_id>/handoff/<service_slug>')
+def prospect_handoff(contact_id, service_slug):
+    """A Website Builder brief assembled from what Winston verified while selling."""
+    try:
+        return jsonify(fulfilment.build_handoff(contact_id, service_slug).as_dict())
+    except NotBuilderFulfilled as exc:
+        return jsonify({"error": str(exc)}), 400
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+
+
+@app.route('/projects', methods=['POST'])
+def projects_create():
+    """Convert a closed prospect into a tracked engagement."""
+    body = request.get_json(silent=True) or {}
+    try:
+        project = fulfilment.create_project(
+            body.get("contact_id", ""), body.get("service_slug", ""),
+            agreed_price_usd=body.get("agreed_price_usd"), actor="operator")
+    except (NotBuilderFulfilled, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except KeyError:
+        return jsonify({"success": False, "error": "Unknown contact"}), 404
+    return jsonify({"success": True, "project": project})
+
+
+@app.route('/projects/<project_id>/status', methods=['POST'])
+def projects_status(project_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        project = fulfilment.update_status(
+            project_id, body.get("status", ""),
+            builder_reference=body.get("builder_reference", ""),
+            published_url=body.get("published_url", ""),
+            notes=body.get("notes", ""), actor="operator")
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except KeyError:
+        return jsonify({"success": False, "error": "Unknown project"}), 404
+    return jsonify({"success": True, "project": project})
 
 
 @app.route('/research/batch', methods=['POST'])

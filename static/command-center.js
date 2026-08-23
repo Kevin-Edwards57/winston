@@ -237,7 +237,7 @@ async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{a
    tab, the rest fired toasts or scrolled. These are actual views over data
    the backend already exposes. */
 
-const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','research','agents','ops'];
+const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','research','projects','agents','ops'];
 
 function showView(name){
   if(!VIEWS.includes(name)) name='editorial';
@@ -246,7 +246,7 @@ function showView(name){
   if(location.hash.slice(1)!==name) history.replaceState(null,'',`#${name}`);
   const loader={sent:loadSent,social:loadSocial,blocked:loadBlocked,pricing:loadPricing,
                 catalog:loadCatalog,providers:loadProviders,research:loadResearch,
-                agents:loadAgents,ops:loadOps}[name];
+                projects:loadProjects,agents:loadAgents,ops:loadOps}[name];
   if(loader) loader().catch(error=>toast(error.message,true));
 }
 
@@ -582,6 +582,7 @@ const COMMANDS=[
   {label:'Go to Pricing', run:()=>showView('pricing')},
   {label:'Go to Catalogue', run:()=>showView('catalog')},
   {label:'Go to AI and cost', run:()=>showView('providers')},
+  {label:'Go to Client projects', run:()=>showView('projects')},
   {label:'Go to Agents', run:()=>showView('agents')},
   {label:'Go to Sent history', run:()=>showView('sent')},
   {label:'Go to Social leads', run:()=>showView('social')},
@@ -622,6 +623,37 @@ function buildPalette(){
   };
   dialog.addEventListener('close',()=>{input.value=''});
   window.openPalette=()=>{render();dialog.showModal();input.focus()};
+}
+
+
+/* ── Client projects ────────────────────────────────────────────────────
+   The Website Builder exposes no HTTP API, so status here is what a human
+   reported. The view says so rather than implying it was observed. */
+
+async function loadProjects(){
+  const data=await api('/projects');
+  const note=$('projects-note');note.replaceChildren();
+  note.append(el('div','warning-banner',data.status.integration_note));
+
+  table($('projects-body'),['Client','Service','Status','Reported','Builder ref','Published','Price'],
+    data.projects||[],item=>{
+      const tr=el('tr');
+      tr.append(el('td',null,item.business));
+      tr.append(el('td','muted',item.service_slug));
+      const st=el('td');
+      st.append(badge(item.status.replaceAll('_',' '),
+        item.status==='published'?'ok':item.status==='cancelled'?'muted':'info'));
+      tr.append(st);
+      tr.append(el('td','muted',item.status_reported_at?new Date(item.status_reported_at).toLocaleDateString():'—'));
+      tr.append(el('td','mono',item.builder_reference||'—'));
+      const pub=el('td');
+      const url=safeURL(item.published_url);
+      if(url){const a=el('a',null,item.published_url);a.href=url;a.target='_blank';a.rel='noopener noreferrer';pub.append(a)}
+      else pub.textContent='—';
+      tr.append(pub);
+      tr.append(el('td','mono',item.agreed_price_usd?`$${Math.round(item.agreed_price_usd).toLocaleString()}`:'—'));
+      return tr;
+    },'No client projects yet. A prospect becomes a project once they buy.');
 }
 
 /* Start only once every declaration above has been evaluated. */

@@ -20,7 +20,7 @@ CODE = re.sub(r"/\*.*?\*/", "", SCRIPT, flags=re.S)
 CODE = re.sub(r"^\s*//.*$", "", CODE, flags=re.M)
 
 VIEWS = ("editorial", "sent", "social", "blocked", "pricing", "catalog", "providers",
-         "research", "agents", "ops")
+         "research", "projects", "agents", "ops")
 
 
 class NavigationTests(unittest.TestCase):
@@ -141,6 +141,10 @@ class RouteTests(unittest.TestCase):
     def test_command_palette_exists(self):
         self.assertIn("openPalette", SCRIPT)
         self.assertIn("COMMANDS", SCRIPT)
+
+    def test_projects_route_declares_no_builder_api(self):
+        payload = self.client.get("/projects").get_json()
+        self.assertFalse(payload["status"]["builder_api_available"])
 
     def test_costs_route_reports_zero_and_no_spend_capability(self):
         payload = self.client.get("/costs").get_json()
