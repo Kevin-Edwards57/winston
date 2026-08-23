@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from winston.repository import WinstonRepository, utc_now
 from winston.ai import AIService, ProviderError
 from winston.commercial import CommercialLedger
+from winston.signals import SignalStore, research_contact
 
 load_dotenv()
 
@@ -28,6 +29,8 @@ repository.initialize()
 ai_service = AIService.from_environment(repository)
 ledger = CommercialLedger(repository)
 ledger.initialize()
+signal_store = SignalStore(repository)
+signal_store.initialize()
 json_write_lock = threading.RLock()
 
 # ============================================================
@@ -1917,6 +1920,26 @@ def run_followups():
         "error": "The legacy follow-up sender was permanently removed. All sending must go "
                  "through the draft/approve/queue/confirm state machine.",
     }), 410
+
+@app.route('/research/<contact_id>', methods=['POST'])
+def research_prospect(contact_id):
+    """Research one business. Deterministic HTML analysis only -- no AI, no paid services."""
+    row = repository.connect().execute(
+        "SELECT id, website FROM contacts WHERE id=?", (contact_id,)).fetchone()
+    if row is None:
+        return jsonify({"success": False, "error": "Unknown contact"}), 404
+    if not row["website"]:
+        return jsonify({"success": False, "error": "Contact has no website to research"}), 400
+    result = research_contact(repository, signal_store, contact_id, row["website"])
+    return jsonify({"success": result["status"] == "ok", **result,
+                    "signals_detail": signal_store.for_contact(contact_id)})
+
+
+@app.route('/research/coverage')
+def research_coverage():
+    """How much of the prospect base has evidence behind it."""
+    return jsonify(signal_store.coverage())
+
 
 @app.route('/funnel')
 def funnel():
