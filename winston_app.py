@@ -20,6 +20,8 @@ from winston.repository import WinstonRepository, utc_now
 from winston.ai import AIService, ProviderError
 from winston.commercial import CommercialLedger
 from winston.signals import SignalStore, research_contact
+from winston.catalog import Catalog, CatalogValidationError, UnknownEntry
+from winston.fit import FitEngine
 
 load_dotenv()
 
@@ -31,6 +33,9 @@ ledger = CommercialLedger(repository)
 ledger.initialize()
 signal_store = SignalStore(repository)
 signal_store.initialize()
+catalog = Catalog(repository)
+catalog.initialize()
+fit_engine = FitEngine(repository, catalog, signal_store)
 json_write_lock = threading.RLock()
 
 # ============================================================
@@ -1920,6 +1925,66 @@ def run_followups():
         "error": "The legacy follow-up sender was permanently removed. All sending must go "
                  "through the draft/approve/queue/confirm state machine.",
     }), 410
+
+@app.route('/catalog')
+def catalog_list():
+    """The YardLink knowledge base. Nothing here is sellable until verified."""
+    return jsonify({
+        "entries": catalog.list(kind=request.args.get("kind")),
+        "readiness": catalog.readiness(),
+    })
+
+
+@app.route('/catalog/<slug>')
+def catalog_entry(slug):
+    entry = catalog.get(slug)
+    if entry is None:
+        return jsonify({"error": "Unknown entry"}), 404
+    return jsonify({"entry": entry, "proof": catalog.proof_for(slug),
+                    "revisions": catalog.revisions(slug, limit=20)})
+
+
+@app.route('/catalog', methods=['POST'])
+def catalog_upsert():
+    """Add or edit a product/service/portfolio entry. No code change required."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"success": True, "entry": catalog.upsert(payload, actor="user")})
+    except CatalogValidationError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+@app.route('/catalog/<slug>/verify', methods=['POST'])
+def catalog_verify(slug):
+    """Confirm an entry's claims. Winston will not sell anything unverified."""
+    body = request.get_json(silent=True) or {}
+    try:
+        entry = catalog.verify(slug, actor="user", verified=bool(body.get("verified", True)))
+    except UnknownEntry:
+        return jsonify({"success": False, "error": "Unknown entry"}), 404
+    return jsonify({"success": True, "entry": entry})
+
+
+@app.route('/catalog/link', methods=['POST'])
+def catalog_link():
+    """Link proof to an offer, e.g. web-development <- proves <- otonia."""
+    body = request.get_json(silent=True) or {}
+    try:
+        link_id = catalog.link(body.get("from", ""), body.get("to", ""),
+                               body.get("relation", "proves"), note=body.get("note", ""))
+    except (CatalogValidationError, UnknownEntry) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "link_id": link_id})
+
+
+@app.route('/prospects/<contact_id>/fit')
+def prospect_fit(contact_id):
+    """What this prospect needs, what YardLink can provide, and what proves it."""
+    try:
+        return jsonify(fit_engine.assess(contact_id).as_dict())
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+
 
 @app.route('/research/<contact_id>', methods=['POST'])
 def research_prospect(contact_id):
