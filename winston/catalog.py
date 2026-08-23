@@ -55,6 +55,12 @@ PROOF_KINDS = frozenset({"PRODUCT", "SERVICE", "PORTFOLIO", "INTERNAL_TOOL"})
 
 RELATIONS = ("proves", "pairs_with", "upsell", "cross_sell", "replaces")
 
+# Who an entry is SOLD to. This is separate from who it is strategically relevant to.
+# YardLink Eats is sold to consumers, but restaurants are the B2B segment it creates a
+# relationship with -- and a restaurant does not buy a consumer discovery app. Without
+# this distinction the fit engine would offer a consumer product to a business prospect.
+AUDIENCES = ("consumer", "business", "both")
+
 CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS catalog_entries (
     slug TEXT PRIMARY KEY,
@@ -69,6 +75,8 @@ CREATE TABLE IF NOT EXISTS catalog_entries (
     capabilities_json TEXT NOT NULL DEFAULT '[]',
     limitations_json TEXT NOT NULL DEFAULT '[]',
     integrations_json TEXT NOT NULL DEFAULT '[]',
+    audience TEXT NOT NULL DEFAULT 'business',
+    strategic_segments_json TEXT NOT NULL DEFAULT '[]',
     deployment_model TEXT NOT NULL DEFAULT '',
     pricing_model TEXT NOT NULL DEFAULT '',
     price_min_usd REAL,
@@ -104,10 +112,11 @@ CREATE TABLE IF NOT EXISTS catalog_revisions (
 CREATE INDEX IF NOT EXISTS catalog_revisions_slug ON catalog_revisions(slug, created_at DESC);
 """
 
-LIST_FIELDS = ("industries", "problems_solved", "capabilities", "limitations", "integrations")
+LIST_FIELDS = ("industries", "problems_solved", "capabilities", "limitations",
+               "integrations", "strategic_segments")
 
 SCALAR_FIELDS = (
-    "name", "kind", "status", "verified", "description", "ideal_customer",
+    "name", "kind", "status", "verified", "description", "ideal_customer", "audience",
     "deployment_model", "pricing_model", "price_min_usd", "price_max_usd",
     "recurring_usd", "effort_hours_min", "effort_hours_max", "notes",
 )
@@ -120,31 +129,92 @@ SCALAR_FIELDS = (
 # against. Kevin verifies each entry, and only then does it become recommendable.
 
 SEED_ENTRIES: tuple[dict[str, Any], ...] = (
+    # Consumer-facing, but strategically central to the restaurant segment. The
+    # audience/strategic_segments split keeps Winston from pitching a consumer discovery
+    # app to a restaurant owner while still letting it cite the app as proof of
+    # restaurant-focused engineering.
     {"slug": "yardlink-eats", "name": "YardLink Eats", "kind": "PRODUCT",
-     "status": "EXPERIMENTAL", "verified": 0,
-     "notes": "Named by the operator as a product. Capabilities, status, pricing, and "
-              "target industries are unconfirmed and must be filled in before Winston "
-              "may recommend it."},
+     "status": "ACTIVE_PRODUCT", "audience": "consumer", "verified": 1,
+     "description": "Consumer app for discovering Caribbean and Jamaican restaurants and "
+                    "food businesses, with map-based discovery and an AI food guide.",
+     "ideal_customer": "Consumers looking for Caribbean and Jamaican food. Restaurants "
+                       "participate through discovery and distribution rather than by "
+                       "purchasing the app.",
+     "capabilities": ["restaurant discovery", "Jamaican restaurant discovery",
+                      "Caribbean restaurant discovery", "GPS and location",
+                      "map-based discovery", "restaurant listings", "restaurant photos",
+                      "cuisine classification", "must-try dish information",
+                      "Errol AI Caribbean food guide", "Caribbean Passport gamification",
+                      "iOS application", "Android application", "web experience",
+                      "curated restaurant data"],
+     "limitations": ["not a restaurant SaaS product", "not sold to restaurants",
+                     "no restaurant-side commercial offering defined yet"],
+     "strategic_segments": ["restaurant", "jamaican restaurant", "caribbean restaurant",
+                            "catering"],
+     "deployment_model": "consumer mobile and web application",
+     "notes": "Restaurants do NOT buy YardLink Eats. audience=consumer keeps it out of B2B "
+              "offer matching. It gives YardLink standing and distribution in the restaurant "
+              "market and is citable as proof of restaurant-focused technology when pitching "
+              "verified services. Change audience to 'both' only if a specific commercial "
+              "restaurant offering is defined and verified."},
+
+    # Target market is known from the operator. Feature-level capabilities are not, and
+    # the directive is explicit: do not invent them.
     {"slug": "wedlink", "name": "WedLink", "kind": "PRODUCT",
-     "status": "EXPERIMENTAL", "verified": 0,
-     "notes": "Named by the operator as a product, referenced in a wedding-venue example. "
-              "Capabilities and pricing unconfirmed."},
+     "status": "EXPERIMENTAL", "audience": "business", "verified": 0,
+     "description": "Wedding-industry product.",
+     "ideal_customer": "Wedding venues, wedding vendors, photographers, florists, "
+                       "caterers, and other wedding-related businesses.",
+     "strategic_segments": ["photographer", "florist", "catering"],
+     "limitations": ["capabilities not yet verified against the repository"],
+     "notes": "Target market confirmed by the operator; feature-level capabilities are "
+              "explicitly unverified and must not be claimed. Wedding venues are not yet "
+              "present in Winston's prospect database and need a discovery campaign."},
+
     {"slug": "guardlink", "name": "GuardLink", "kind": "PRODUCT",
-     "status": "EXPERIMENTAL", "verified": 0,
-     "notes": "Named by the operator as a product, referenced in a security-company "
-              "workforce-management example. Capabilities and pricing unconfirmed."},
+     "status": "EXPERIMENTAL", "audience": "business", "verified": 0,
+     "description": "Product for security companies and security workforce operations.",
+     "ideal_customer": "Security companies, security workforce operators, and security "
+                       "operations teams.",
+     "limitations": ["capabilities not yet verified against the repository"],
+     "notes": "Target market confirmed by the operator; capabilities explicitly unverified. "
+              "Security companies are not a current Winston prospect category and need a "
+              "discovery campaign."},
+
     {"slug": "otonia", "name": "Otonia", "kind": "PORTFOLIO",
-     "status": "PORTFOLIO_ONLY", "verified": 0,
-     "notes": "Cited as proof of consumer mobile development and polished UX. Explicitly "
-              "NOT to be pitched as a product."},
+     "status": "PORTFOLIO_ONLY", "audience": "consumer", "verified": 1,
+     "description": "Polished consumer calm and wellness application with an interactive "
+                    "Zen Garden, guided calming sessions, ambient audio, and 13 games.",
+     "capabilities": ["Zen Garden interactive environment", "water, lanterns, koi, weather",
+                      "customizable companion", "Calm Studio guided sessions",
+                      "ambient sound system", "13 calming games", "Word Match", "Focus Grid",
+                      "Bubble Pop", "Rain Drop", "Rhythm Calm", "Puzzle Room", "journaling",
+                      "mood and experience tracking", "AI conversation through Talk",
+                      "ambience system: rain, ocean, waterfall, forest, fireplace, night"],
+     "limitations": ["portfolio evidence only", "not sold to wellness businesses"],
+     "notes": "Proof of polished mobile development, sophisticated UX, consumer "
+              "applications, interactive experiences, gamification, AI integration, "
+              "companion systems, and audio systems. Explicitly NOT a product."},
+
     {"slug": "susan", "name": "Susan", "kind": "PORTFOLIO",
-     "status": "PORTFOLIO_ONLY", "verified": 0,
-     "notes": "Separate job-application automation project. Portfolio evidence only."},
+     "status": "PORTFOLIO_ONLY", "audience": "consumer", "verified": 1,
+     "description": "AI-powered job-application automation and career-search system.",
+     "capabilities": ["AI automation", "job discovery", "application automation",
+                      "workflow automation", "resume and application tailoring",
+                      "high-throughput automation", "AI-assisted workflows"],
+     "limitations": ["portfolio evidence only", "not commercially available"],
+     "notes": "Proof of AI automation and high-throughput workflow engineering."},
+
     {"slug": "winston", "name": "Winston", "kind": "INTERNAL_TOOL",
-     "status": "INTERNAL_TOOL", "verified": 0,
-     "notes": "YardLink's own commercial intelligence platform. May be cited as proof of "
-              "AI automation and data engineering capability. Not sellable unless the "
-              "operator explicitly reclassifies it."},
+     "status": "INTERNAL_TOOL", "audience": "business", "verified": 1,
+     "description": "YardLink Studio's internal commercial-intelligence, prospect-research, "
+                    "and sales-automation platform.",
+     "capabilities": ["AI automation", "sales automation", "data engineering",
+                      "commercial intelligence", "AI agents", "workflow automation",
+                      "analytics", "internal business software", "machine-learning systems"],
+     "limitations": ["internal tool", "never sold to prospects"],
+     "notes": "May be cited as proof of AI automation and data engineering capability. "
+              "Never present Winston as something a prospect can purchase."},
 )
 
 
@@ -164,9 +234,19 @@ class Catalog:
 
     # ── setup ────────────────────────────────────────────────────────────
 
+    NEW_COLUMNS = (
+        ("audience", "TEXT NOT NULL DEFAULT 'business'"),
+        ("strategic_segments_json", "TEXT NOT NULL DEFAULT '[]'"),
+    )
+
     def initialize(self, *, seed: bool = True) -> None:
         with self.repository.transaction(immediate=True) as connection:
             connection.executescript(CATALOG_SCHEMA)
+            # Additive migration for catalogues created before these columns existed.
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(catalog_entries)")}
+            for column, definition in self.NEW_COLUMNS:
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE catalog_entries ADD COLUMN {column} {definition}")
         if seed:
             for entry in SEED_ENTRIES:
                 if self.get(entry["slug"]) is None:
@@ -190,6 +270,10 @@ class Catalog:
         if kind == "SERVICE" and status not in ("SERVICE", "EXPERIMENTAL", "ARCHIVED", "COMING_SOON"):
             raise CatalogValidationError(f"a SERVICE entry cannot have status {status!r}")
 
+        audience = payload.get("audience", "business")
+        if audience not in AUDIENCES:
+            raise CatalogValidationError(f"audience must be one of {AUDIENCES}, got {audience!r}")
+
         for field in ("price_min_usd", "price_max_usd"):
             value = payload.get(field)
             if value is not None and float(value) < 0:
@@ -206,8 +290,14 @@ class Catalog:
         for field in LIST_FIELDS:
             entry[field] = json.loads(entry.pop(f"{field}_json", "[]") or "[]")
         entry["verified"] = bool(entry["verified"])
+        entry.setdefault("audience", "business")
         entry["sellable"] = entry["status"] in SELLABLE_STATUSES and entry["verified"]
-        entry["citable_as_proof"] = entry["kind"] in PROOF_KINDS
+        # Sellable is not the same as offerable to the businesses Winston prospects.
+        # A verified, active consumer product is genuinely for sale -- just not to a
+        # barbershop. Only business-facing entries may become an outreach offer.
+        entry["offerable_to_business"] = entry["sellable"] and entry["audience"] in ("business", "both")
+        # Proof is a factual claim made in a real email, so it requires verification too.
+        entry["citable_as_proof"] = entry["kind"] in PROOF_KINDS and entry["verified"]
         return entry
 
     def get(self, slug: str) -> dict[str, Any] | None:
@@ -237,12 +327,35 @@ class Catalog:
         """Entries Winston may actually build a recommendation around."""
         return [e for e in self.list(sellable_only=True, include_unverified=False)]
 
+    def offerable(self, industry: str = "") -> list[dict[str, Any]]:
+        """Entries Winston may actually offer a business prospect.
+
+        Excludes consumer products even when they are verified and shipping: a
+        restaurant does not buy a consumer discovery app. Those entries remain
+        available as proof through :meth:`proof_for` and :meth:`strategic_proof_for`.
+        """
+        return [e for e in self.list(sellable_only=True, include_unverified=False)
+                if e["offerable_to_business"]]
+
+    def strategic_proof_for(self, industry: str) -> list[dict[str, Any]]:
+        """Verified entries that create standing in an industry without being sold to it.
+
+        YardLink Eats is not sold to restaurants, but it demonstrates restaurant-focused
+        engineering and gives YardLink an existing relationship in that market. That is
+        credibility to cite, not an offer to make.
+        """
+        industry = (industry or "").casefold().strip()
+        if not industry:
+            return []
+        return [e for e in self.list(include_unverified=False)
+                if industry in {str(s).casefold() for s in (e.get("strategic_segments") or [])}]
+
     def proof_for(self, slug: str) -> list[dict[str, Any]]:
         """Entries linked as evidence that YardLink can deliver this one."""
         with self.repository.read() as connection:
             rows = connection.execute(
                 """SELECT e.* FROM catalog_links l JOIN catalog_entries e ON e.slug = l.to_slug
-                   WHERE l.from_slug=? AND l.relation='proves'""", (slug,)).fetchall()
+                   WHERE l.from_slug=? AND l.relation='proves' AND e.verified=1""", (slug,)).fetchall()
         return [self._hydrate(row) for row in rows]
 
     def revisions(self, slug: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -263,6 +376,7 @@ class Catalog:
         existing = self.get(slug)
         merged: dict[str, Any] = {
             "kind": "PRODUCT", "status": "EXPERIMENTAL", "verified": 0, "name": slug,
+            "audience": "business",
         }
         if existing:
             merged.update({k: v for k, v in existing.items()
@@ -368,7 +482,9 @@ class Catalog:
         that should be visible rather than silently producing zero recommendations.
         """
         entries = self.list()
-        sellable = [e for e in entries if e["sellable"]]
+        # Readiness is about outreach: what Winston may offer a business prospect. A
+        # verified consumer product is sellable but contributes nothing here.
+        sellable = [e for e in entries if e["offerable_to_business"]]
         awaiting = [
             {"slug": e["slug"], "name": e["name"], "kind": e["kind"], "status": e["status"],
              "missing": [f for f in ("description", "problems_solved", "capabilities",
@@ -379,8 +495,9 @@ class Catalog:
         return {
             "entries": len(entries),
             "by_kind": {k: sum(1 for e in entries if e["kind"] == k) for k in KINDS},
-            "sellable": len(sellable),
-            "sellable_slugs": [e["slug"] for e in sellable],
+            "offerable_to_business": len(sellable),
+            "offerable_slugs": [e["slug"] for e in sellable],
+            "sellable_any_audience": sum(1 for e in entries if e["sellable"]),
             "awaiting_verification": awaiting,
             "can_recommend": bool(sellable),
         }

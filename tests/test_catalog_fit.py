@@ -60,10 +60,15 @@ class ClassificationGateTests(CatalogBase):
         with self.assertRaises(CatalogValidationError):
             self.catalog.upsert({"slug": "winston", "kind": "INTERNAL_TOOL", "status": "BETA_PRODUCT"})
 
-    def test_seeded_entries_are_all_unsellable_until_verified(self):
-        """Seed data knows names only, so nothing may be recommended out of the box."""
+    def test_no_seeded_entry_is_offerable_to_a_business(self):
+        """Out of the box Winston has nothing it may pitch to a prospect.
+
+        YardLink Eats is verified and sellable, but it is a consumer app, so it is
+        still not something a barbershop or restaurant can be offered.
+        """
         for entry in self.catalog.list():
-            self.assertFalse(entry["sellable"], f"{entry['slug']} is sellable without verification")
+            self.assertFalse(entry["offerable_to_business"],
+                             f"{entry['slug']} would be offered to a business prospect")
 
     def test_verification_is_required_for_sellability(self):
         self.catalog.upsert({"slug": "svc", "name": "S", "kind": "SERVICE", "status": "SERVICE"})
@@ -100,6 +105,55 @@ class ClassificationGateTests(CatalogBase):
                                  "price_min_usd": 2000, "price_max_usd": 500})
 
 
+class AudienceTests(CatalogBase):
+    """A consumer product is genuinely for sale, just not to a business prospect.
+
+    YardLink Eats is ACTIVE_PRODUCT and verified. It is also a consumer app, and a
+    restaurant does not buy a consumer discovery app. Conflating "sellable" with
+    "offerable to the businesses Winston prospects" would have Winston pitching it to
+    restaurant owners.
+    """
+
+    def test_consumer_product_is_sellable_but_not_offerable_to_business(self):
+        eats = self.catalog.get("yardlink-eats")
+        self.assertEqual(eats["audience"], "consumer")
+        self.assertTrue(eats["sellable"], "it is a real, shipping product")
+        self.assertFalse(eats["offerable_to_business"],
+                         "a restaurant does not buy a consumer discovery app")
+
+    def test_consumer_product_never_enters_the_offer_set(self):
+        self.assertNotIn("yardlink-eats", [e["slug"] for e in self.catalog.offerable()])
+
+    def test_consumer_product_is_still_citable_as_proof(self):
+        self.assertTrue(self.catalog.get("yardlink-eats")["citable_as_proof"])
+
+    def test_strategic_segments_confer_standing_without_an_offer(self):
+        standing = self.catalog.strategic_proof_for("restaurant")
+        self.assertEqual([e["slug"] for e in standing], ["yardlink-eats"])
+        self.assertFalse(standing[0]["offerable_to_business"])
+
+    def test_strategic_standing_is_industry_specific(self):
+        self.assertEqual(self.catalog.strategic_proof_for("barbershop"), [])
+
+    def test_unverified_entries_confer_no_standing(self):
+        """WedLink lists photographer as strategic, but its claims are unconfirmed."""
+        self.assertEqual(self.catalog.strategic_proof_for("photographer"), [])
+
+    def test_audience_both_is_offerable(self):
+        self.catalog.upsert({"slug": "dual", "name": "Dual", "kind": "PRODUCT",
+                             "status": "ACTIVE_PRODUCT", "audience": "both"})
+        self.catalog.verify("dual")
+        self.assertTrue(self.catalog.get("dual")["offerable_to_business"])
+
+    def test_invalid_audience_is_rejected(self):
+        with self.assertRaises(CatalogValidationError):
+            self.catalog.upsert({"slug": "x", "kind": "PRODUCT", "status": "ACTIVE_PRODUCT",
+                                 "audience": "everyone"})
+
+    def test_unverified_proof_is_not_citable(self):
+        self.assertFalse(self.catalog.get("wedlink")["citable_as_proof"])
+
+
 class CatalogEditingTests(CatalogBase):
     def test_products_can_be_added_without_code_changes(self):
         self.catalog.upsert({"slug": "brand-new", "name": "Brand New", "kind": "PRODUCT",
@@ -119,10 +173,12 @@ class CatalogEditingTests(CatalogBase):
         with self.assertRaises(UnknownEntry):
             self.catalog.link("web-development", "nope", "proves")
 
-    def test_readiness_reports_nothing_sellable_honestly(self):
+    def test_readiness_reports_nothing_offerable_honestly(self):
         readiness = self.catalog.readiness()
         self.assertFalse(readiness["can_recommend"])
-        self.assertEqual(readiness["sellable"], 0)
+        self.assertEqual(readiness["offerable_to_business"], 0)
+        self.assertGreater(readiness["sellable_any_audience"], 0,
+                           "YardLink Eats is a real product, just not a B2B offer")
         self.assertTrue(readiness["awaiting_verification"])
 
 
@@ -242,6 +298,22 @@ class FitEngineTests(CatalogBase):
         self._research()
         researched = self.engine.assess(self.contact_id)
         self.assertLess(unresearched.commercial_opportunity, researched.commercial_opportunity)
+
+    def test_strategic_standing_surfaces_for_a_restaurant(self):
+        """YardLink Eats should appear as standing, never as an offer."""
+        restaurant_id, _ = self.repo.upsert_contact(
+            {"name": "Jerk Spot", "email": "j@example.com", "place_id": "p9",
+             "type": "restaurant", "website": "http://jerk.com"}, "test")
+        self.signals.record(restaurant_id, extract_signals(STALE_SITE, "http://jerk.com"))
+        run = self.signals.start_run(restaurant_id, "http://jerk.com")
+        self.signals.complete_run(run, status="ok", pages=1, signals=8)
+
+        result = self.engine.assess(restaurant_id)
+        slugs = [s["slug"] for s in result.strategic_standing]
+        self.assertIn("yardlink-eats", slugs)
+        self.assertFalse(result.strategic_standing[0]["offerable_to_business"])
+        self.assertIsNone(result.recommended_product,
+                          "a consumer app must never become the recommended product")
 
     def test_unknown_contact_raises(self):
         with self.assertRaises(KeyError):

@@ -73,6 +73,7 @@ class FitResult:
     recommended_service: dict[str, Any] | None = None
     proof: list[dict[str, Any]] = field(default_factory=list)
     alternatives: list[dict[str, Any]] = field(default_factory=list)
+    strategic_standing: list[dict[str, Any]] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
 
@@ -91,6 +92,7 @@ class FitResult:
             "recommended_product": self.recommended_product,
             "recommended_service": self.recommended_service,
             "proof": self.proof,
+            "strategic_standing": self.strategic_standing,
             "alternatives": self.alternatives,
             "reasons": self.reasons,
             "blockers": self.blockers,
@@ -248,15 +250,17 @@ class FitEngine:
                 (sum(observed_confidences) / len(observed_confidences)) * coverage, 3)
 
         # ── 2. What can YardLink genuinely provide? ──
-        sellable = self.catalog.sellable()
-        if not sellable:
+        # Offers are drawn only from business-facing entries. A verified, shipping
+        # consumer product is genuinely for sale -- just not to a barbershop -- so it is
+        # excluded here and surfaces as proof instead.
+        offerable = self.catalog.offerable()
+        if not offerable:
             result.blockers.append(
-                "No verified sellable catalogue entries. Winston will not recommend "
-                "unverified products. Fill in and verify entries via /catalog.")
-            return result
+                "No verified business-facing catalogue entries. Winston will not "
+                "recommend unverified products. Fill in and verify entries via /catalog.")
 
-        products = [e for e in sellable if e["kind"] == "PRODUCT"]
-        services = [e for e in sellable if e["kind"] == "SERVICE"]
+        products = [e for e in offerable if e["kind"] == "PRODUCT"]
+        services = [e for e in offerable if e["kind"] == "SERVICE"]
 
         scored_products = sorted(
             ((e, *_match_score(e, result.problems, industry)) for e in products),
@@ -291,6 +295,21 @@ class FitEngine:
         ]
 
         # ── 3. What proves we can build it? ──
+        # Standing in this industry from work that is NOT sold to it. YardLink Eats is
+        # a consumer app, but it demonstrates restaurant-focused engineering and gives
+        # YardLink an existing relationship in that market -- credibility to cite, never
+        # an offer to make.
+        for entry in self.catalog.strategic_proof_for(industry):
+            result.strategic_standing.append({
+                "slug": entry["slug"], "name": entry["name"], "kind": entry["kind"],
+                "audience": entry.get("audience", "business"),
+                "offerable_to_business": entry["offerable_to_business"],
+                "why": f"demonstrates experience in the {industry} market",
+            })
+            result.reasons.append(
+                f"{entry['name']} gives YardLink standing with {industry} businesses "
+                "(cite as proof, do not offer it)")
+
         chosen = result.recommended_product or result.recommended_service
         if chosen:
             proof = self.catalog.proof_for(chosen["slug"])
@@ -299,7 +318,8 @@ class FitEngine:
                  "status": p["status"], "sellable": p["sellable"]}
                 for p in proof
             ]
-            result.portfolio_relevance = min(len(result.proof) * 0.4, 1.0) if result.proof else 0.0
+            result.portfolio_relevance = min(
+                (len(result.proof) + len(result.strategic_standing)) * 0.4, 1.0)
             if not result.proof:
                 result.blockers.append(
                     f"No portfolio evidence linked to {chosen['slug']} — outreach cannot "
