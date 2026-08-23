@@ -1,5 +1,12 @@
 """YardLink Studio knowledge base — what we sell, and what merely proves we can build.
 
+**Brand hierarchy.** YardLink Studio (https://www.yardlinkstudio.com) is the company.
+YardLink Eats (https://www.yardlinkeats.com) is a product built by YardLink Studio: a
+Caribbean restaurant discovery network covering Jamaican, Guyanese, Haitian, and
+Trinidadian businesses. The company is the seller; the product is evidence of what the
+company can build, and is sold to consumers rather than to the restaurants it lists.
+
+
 The distinction this module exists to enforce: **a portfolio project is not a product.**
 
 Winston built for YardLink is proof of AI automation capability. Otonia is proof of
@@ -76,6 +83,7 @@ CREATE TABLE IF NOT EXISTS catalog_entries (
     limitations_json TEXT NOT NULL DEFAULT '[]',
     integrations_json TEXT NOT NULL DEFAULT '[]',
     audience TEXT NOT NULL DEFAULT 'business',
+    url TEXT NOT NULL DEFAULT '',
     strategic_segments_json TEXT NOT NULL DEFAULT '[]',
     deployment_model TEXT NOT NULL DEFAULT '',
     pricing_model TEXT NOT NULL DEFAULT '',
@@ -116,7 +124,7 @@ LIST_FIELDS = ("industries", "problems_solved", "capabilities", "limitations",
                "integrations", "strategic_segments")
 
 SCALAR_FIELDS = (
-    "name", "kind", "status", "verified", "description", "ideal_customer", "audience",
+    "name", "kind", "status", "verified", "description", "ideal_customer", "audience", "url",
     "deployment_model", "pricing_model", "price_min_usd", "price_max_usd",
     "recurring_usd", "effort_hours_min", "effort_hours_max", "notes",
 )
@@ -129,92 +137,184 @@ SCALAR_FIELDS = (
 # against. Kevin verifies each entry, and only then does it become recommendable.
 
 SEED_ENTRIES: tuple[dict[str, Any], ...] = (
-    # Consumer-facing, but strategically central to the restaurant segment. The
-    # audience/strategic_segments split keeps Winston from pitching a consumer discovery
-    # app to a restaurant owner while still letting it cite the app as proof of
-    # restaurant-focused engineering.
+    # ── Products ─────────────────────────────────────────────────────────
+    # Consumer-facing, strategically central to the restaurant segment. The
+    # audience/strategic_segments split keeps Winston from pitching a consumer
+    # discovery app to a restaurant owner while still citing it as proof.
     {"slug": "yardlink-eats", "name": "YardLink Eats", "kind": "PRODUCT",
      "status": "ACTIVE_PRODUCT", "audience": "consumer", "verified": 1,
-     "description": "Consumer app for discovering Caribbean and Jamaican restaurants and "
-                    "food businesses, with map-based discovery and an AI food guide.",
-     "ideal_customer": "Consumers looking for Caribbean and Jamaican food. Restaurants "
-                       "participate through discovery and distribution rather than by "
-                       "purchasing the app.",
-     "capabilities": ["restaurant discovery", "Jamaican restaurant discovery",
-                      "Caribbean restaurant discovery", "GPS and location",
-                      "map-based discovery", "restaurant listings", "restaurant photos",
-                      "cuisine classification", "must-try dish information",
-                      "Errol AI Caribbean food guide", "Caribbean Passport gamification",
-                      "iOS application", "Android application", "web experience",
-                      "curated restaurant data"],
+     "description": "Caribbean restaurant discovery network. Connects people with Caribbean "
+                    "restaurants and food spots, particularly Jamaican, Guyanese, Haitian, "
+                    "and Trinidadian businesses, so they can see what is nearby, what each "
+                    "place serves, and which dishes are worth trying. It puts the Caribbean "
+                    "food scene in one place instead of scattered across Google Maps, "
+                    "Instagram, TikTok, and Facebook pages.",
+     "ideal_customer": "People looking for Caribbean food who want to find and support "
+                       "Caribbean-owned restaurants. Restaurants participate through "
+                       "discovery, not by purchasing the app.",
+     "capabilities": ["Caribbean restaurant discovery", "Jamaican restaurant discovery",
+                      "Guyanese restaurant discovery", "Haitian restaurant discovery",
+                      "Trinidadian restaurant discovery", "location-aware discovery", "maps",
+                      "restaurant listings", "restaurant photos", "cuisine classification",
+                      "must-try dish information", "Errol AI food guide",
+                      "Caribbean Passport gamification", "iOS application",
+                      "Android application", "web experience"],
      "limitations": ["not a restaurant SaaS product", "not sold to restaurants",
-                     "no restaurant-side commercial offering defined yet"],
+                     "no restaurant-side commercial offering defined"],
      "strategic_segments": ["restaurant", "jamaican restaurant", "caribbean restaurant",
                             "catering"],
+     "url": "https://www.yardlinkeats.com",
      "deployment_model": "consumer mobile and web application",
      "notes": "Restaurants do NOT buy YardLink Eats. audience=consumer keeps it out of B2B "
-              "offer matching. It gives YardLink standing and distribution in the restaurant "
-              "market and is citable as proof of restaurant-focused technology when pitching "
-              "verified services. Change audience to 'both' only if a specific commercial "
-              "restaurant offering is defined and verified."},
+              "offer matching while remaining citable as proof of restaurant technology, "
+              "mobile UX, location-aware apps, and AI integration. The Caribbean focus is "
+              "the product's own stated purpose and may inform relevance and tone. It must "
+              "never become a pricing variable or a proxy for inferring anything about an "
+              "owner."},
 
-    # Target market is known from the operator. Feature-level capabilities are not, and
-    # the directive is explicit: do not invent them.
+    # Repository check (docs/WedLink/README.md) corrects the strategic brief: WedLink is a
+    # couple-facing RSVP and invitation app, not a B2B product for venues or vendors, and
+    # the README states it has zero production users. Recorded as observed, not as briefed.
     {"slug": "wedlink", "name": "WedLink", "kind": "PRODUCT",
-     "status": "EXPERIMENTAL", "audience": "business", "verified": 0,
-     "description": "Wedding-industry product.",
-     "ideal_customer": "Wedding venues, wedding vendors, photographers, florists, "
-                       "caterers, and other wedding-related businesses.",
+     "status": "COMING_SOON", "audience": "consumer", "verified": 1,
+     "description": "Wedding RSVP and invitation app for iOS and Android. Couples create a "
+                    "wedding, invite guests individually or by shared link, and track "
+                    "attendance. Guests reply without creating an account.",
+     "ideal_customer": "Couples planning a wedding.",
+     "capabilities": ["wedding creation", "individual guest invitations",
+                      "shared-link invitations", "RSVP tracking",
+                      "guest reply without account", "iOS application",
+                      "Android application"],
+     "limitations": ["zero production users per its own README",
+                     "not a B2B product for venues, florists, or caterers",
+                     "not commercially available"],
      "strategic_segments": ["photographer", "florist", "catering"],
-     "limitations": ["capabilities not yet verified against the repository"],
-     "notes": "Target market confirmed by the operator; feature-level capabilities are "
-              "explicitly unverified and must not be claimed. Wedding venues are not yet "
-              "present in Winston's prospect database and need a discovery campaign."},
+     "notes": "The strategic brief described WedLink as a wedding-industry B2B product. The "
+              "repository describes a consumer RSVP app for couples with zero production "
+              "users. Recorded as the repository describes it. Citable as proof of mobile "
+              "development and event-workflow software; not sellable."},
 
+    # Repository check (docs/guardlink/README.md): a security-industry JOB MARKETPLACE for
+    # guards, not workforce-management software for security operators. Working MVP.
     {"slug": "guardlink", "name": "GuardLink", "kind": "PRODUCT",
-     "status": "EXPERIMENTAL", "audience": "business", "verified": 0,
-     "description": "Product for security companies and security workforce operations.",
-     "ideal_customer": "Security companies, security workforce operators, and security "
-                       "operations teams.",
-     "limitations": ["capabilities not yet verified against the repository"],
-     "notes": "Target market confirmed by the operator; capabilities explicitly unverified. "
-              "Security companies are not a current Winston prospect category and need a "
-              "discovery campaign."},
+     "status": "BETA_PRODUCT", "audience": "both", "verified": 0,
+     "description": "Security-industry job marketplace for NYC, Long Island, and Westchester. "
+                    "Surfaces nearby security jobs with pay, hours, shift, and licence "
+                    "requirements visible on the listing.",
+     "ideal_customer": "Security guards seeking shifts, and security companies posting roles.",
+     "capabilities": ["job search", "database-backed search and filters", "authentication",
+                      "saved jobs", "resume upload", "employer apply links",
+                      "admin moderation"],
+     "limitations": ["working MVP", "commercial terms for employers not yet defined"],
+     "strategic_segments": [],
+     "notes": "The strategic brief described GuardLink as security workforce management. The "
+              "repository describes a two-sided job marketplace. Security companies are "
+              "potential employers on the platform rather than buyers of scheduling "
+              "software. Left unverified until employer-side commercial terms exist. "
+              "Security companies are not a current Winston prospect category."},
 
+    # ── Portfolio ────────────────────────────────────────────────────────
     {"slug": "otonia", "name": "Otonia", "kind": "PORTFOLIO",
      "status": "PORTFOLIO_ONLY", "audience": "consumer", "verified": 1,
-     "description": "Polished consumer calm and wellness application with an interactive "
-                    "Zen Garden, guided calming sessions, ambient audio, and 13 games.",
+     "description": "Consumer calm and wellness application with an interactive Zen Garden, "
+                    "guided calming sessions, ambient audio, journaling, and an AI companion.",
      "capabilities": ["Zen Garden interactive environment", "water, lanterns, koi, weather",
-                      "customizable companion", "Calm Studio guided sessions",
-                      "ambient sound system", "13 calming games", "Word Match", "Focus Grid",
-                      "Bubble Pop", "Rain Drop", "Rhythm Calm", "Puzzle Room", "journaling",
-                      "mood and experience tracking", "AI conversation through Talk",
-                      "ambience system: rain, ocean, waterfall, forest, fireplace, night"],
-     "limitations": ["portfolio evidence only", "not sold to wellness businesses"],
-     "notes": "Proof of polished mobile development, sophisticated UX, consumer "
-              "applications, interactive experiences, gamification, AI integration, "
-              "companion systems, and audio systems. Explicitly NOT a product."},
+                      "customizable animated companion", "Calm Studio guided sessions",
+                      "grounding experiences", "ambient sound system", "13 calming games",
+                      "Word Match", "Focus Grid", "Bubble Pop", "Rain Drop", "Rhythm Calm",
+                      "Puzzle Room", "journaling", "mood tracking",
+                      "AI conversation through Talk",
+                      "ambience: rain, ocean, waterfall, forest, fireplace, night"],
+     "limitations": ["portfolio evidence only", "not sold to wellness businesses",
+                     "not a clinical or medical product"],
+     "notes": "Proof of sophisticated mobile UX, animation, interactive environments, "
+              "gamification, AI integration, conversational systems, audio systems, and "
+              "personalization. Never claim it is a healthcare or medical solution."},
 
     {"slug": "susan", "name": "Susan", "kind": "PORTFOLIO",
      "status": "PORTFOLIO_ONLY", "audience": "consumer", "verified": 1,
-     "description": "AI-powered job-application automation and career-search system.",
-     "capabilities": ["AI automation", "job discovery", "application automation",
-                      "workflow automation", "resume and application tailoring",
-                      "high-throughput automation", "AI-assisted workflows"],
+     "description": "AI-powered career and job-search automation system.",
+     "capabilities": ["AI automation", "job discovery", "application workflows",
+                      "resume and application processing", "intelligent workflows",
+                      "data processing", "AI-assisted decision making"],
      "limitations": ["portfolio evidence only", "not commercially available"],
-     "notes": "Proof of AI automation and high-throughput workflow engineering."},
+     "notes": "Proof of automation systems handling complex multi-step workflows."},
 
+    {"slug": "anansi", "name": "Anansi", "kind": "PORTFOLIO",
+     "status": "PORTFOLIO_ONLY", "audience": "business", "verified": 1,
+     "description": "Data engine behind YardLink Eats. Collects restaurant data from Google "
+                    "Places, provides an editorial review surface for deciding what ships, "
+                    "and answers questions about that data with citations using a local model.",
+     "capabilities": ["data collection", "web scraping", "Google Places ingestion",
+                      "data pipelines", "data normalization", "editorial review workflow",
+                      "structured data", "database ingestion", "local-model question "
+                      "answering with citations", "zero-cost inference"],
+     "limitations": ["portfolio evidence only", "internal data system"],
+     "notes": "Proof of data engineering, pipeline reliability, structured data collection, "
+              "and cost-controlled local inference."},
+
+    # ── Internal ─────────────────────────────────────────────────────────
     {"slug": "winston", "name": "Winston", "kind": "INTERNAL_TOOL",
      "status": "INTERNAL_TOOL", "audience": "business", "verified": 1,
-     "description": "YardLink Studio's internal commercial-intelligence, prospect-research, "
-                    "and sales-automation platform.",
-     "capabilities": ["AI automation", "sales automation", "data engineering",
-                      "commercial intelligence", "AI agents", "workflow automation",
-                      "analytics", "internal business software", "machine-learning systems"],
+     "description": "YardLink Studio's internal commercial-intelligence system. Researches "
+                    "businesses, audits digital presence, matches problems to capabilities, "
+                    "recommends offers, generates outreach, and tracks outcomes.",
+     "capabilities": ["AI agents", "AI orchestration", "sales automation", "data engineering",
+                      "prospect intelligence", "web research", "digital auditing",
+                      "commercial scoring", "prospect memory", "analytics",
+                      "workflow automation", "email automation", "outcome tracking",
+                      "revenue attribution", "local AI inference", "provider routing"],
      "limitations": ["internal tool", "never sold to prospects"],
-     "notes": "May be cited as proof of AI automation and data engineering capability. "
+     "notes": "Citable as proof of AI automation, sales automation, and data engineering. "
               "Never present Winston as something a prospect can purchase."},
+
+    {"slug": "errol", "name": "Errol", "kind": "INTERNAL_TOOL",
+     "status": "INTERNAL_TOOL", "audience": "consumer", "verified": 1,
+     "description": "AI Caribbean food guide integrated into YardLink Eats.",
+     "capabilities": ["conversational AI", "cultural and linguistic adaptation",
+                      "recommendation systems", "AI integration", "consumer-facing AI"],
+     "limitations": ["component of YardLink Eats", "not a standalone product"],
+     "notes": "Citable as proof of conversational AI and consumer-facing AI integration."},
+)
+
+# Candidate YardLink Studio services. Seeded UNVERIFIED by design: the operator must
+# confirm which are genuinely offered before Winston may recommend any of them.
+CANDIDATE_SERVICES: tuple[dict[str, Any], ...] = (
+    {"slug": "web-development", "name": "Web Development",
+     "problems_solved": ["no website", "outdated website", "not mobile friendly",
+                         "weak seo basics", "no lead capture"],
+     "proof": ["yardlink-eats", "otonia"]},
+    {"slug": "website-redesign", "name": "Website Redesign",
+     "problems_solved": ["outdated website", "not mobile friendly", "weak seo basics"],
+     "proof": ["yardlink-eats", "otonia"]},
+    {"slug": "landing-pages", "name": "Landing Pages",
+     "problems_solved": ["no lead capture", "weak seo basics"], "proof": ["yardlink-eats"]},
+    {"slug": "booking-systems", "name": "Booking Systems",
+     "problems_solved": ["no online booking"],
+     "industries": ["barbershop", "hair salon", "nail salon", "dentist", "photographer",
+                    "gym", "auto repair", "cleaning service", "daycare", "tutoring"],
+     "proof": ["wedlink", "yardlink-eats"]},
+    {"slug": "ordering-systems", "name": "Ordering Systems",
+     "problems_solved": ["no online ordering"],
+     "industries": ["restaurant", "jamaican restaurant", "caribbean restaurant", "catering"],
+     "proof": ["yardlink-eats", "anansi"]},
+    {"slug": "lead-capture-systems", "name": "Lead Capture Systems",
+     "problems_solved": ["no lead capture", "no measurement"], "proof": ["winston"]},
+    {"slug": "mobile-app-development", "name": "Mobile App Development",
+     "problems_solved": [], "proof": ["otonia", "yardlink-eats", "wedlink"]},
+    {"slug": "ai-chatbots", "name": "AI Chatbots and Assistants",
+     "problems_solved": [], "proof": ["errol", "otonia", "winston"]},
+    {"slug": "ai-automation", "name": "AI Automation",
+     "problems_solved": [], "proof": ["winston", "susan"]},
+    {"slug": "marketing-automation", "name": "Marketing Automation",
+     "problems_solved": ["no measurement"], "proof": ["winston"]},
+    {"slug": "crm-setup", "name": "CRM Setup", "problems_solved": [], "proof": ["winston"]},
+    {"slug": "custom-software", "name": "Custom Software",
+     "problems_solved": [], "proof": ["guardlink", "winston", "otonia"]},
+    {"slug": "api-backend-development", "name": "API and Backend Development",
+     "problems_solved": [], "proof": ["yardlink-eats", "winston", "anansi"]},
+    {"slug": "data-engineering", "name": "Data Engineering",
+     "problems_solved": [], "proof": ["anansi", "winston"]},
 )
 
 
@@ -237,6 +337,7 @@ class Catalog:
     NEW_COLUMNS = (
         ("audience", "TEXT NOT NULL DEFAULT 'business'"),
         ("strategic_segments_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("url", "TEXT NOT NULL DEFAULT ''"),
     )
 
     def initialize(self, *, seed: bool = True) -> None:
@@ -250,7 +351,29 @@ class Catalog:
         if seed:
             for entry in SEED_ENTRIES:
                 if self.get(entry["slug"]) is None:
-                    self.upsert(dict(entry), actor="seed")
+                    payload = dict(entry)
+                    verified = payload.pop("verified", 0)
+                    self.upsert(payload, actor="seed")
+                    if verified:
+                        self.verify(payload["slug"], actor="seed")
+
+            # Candidate services seed UNVERIFIED. The operator confirms which are
+            # genuinely offered; Winston recommends none of them until then.
+            for service in CANDIDATE_SERVICES:
+                if self.get(service["slug"]) is not None:
+                    continue
+                payload = {
+                    "slug": service["slug"], "name": service["name"], "kind": "SERVICE",
+                    "status": "SERVICE", "audience": "business",
+                    "problems_solved": service.get("problems_solved", []),
+                    "industries": service.get("industries", []),
+                    "notes": "Candidate service. Verify with POST /catalog/<slug>/verify "
+                             "before Winston may recommend it.",
+                }
+                self.upsert(payload, actor="seed")
+                for proof_slug in service.get("proof", []):
+                    if self.get(proof_slug) is not None:
+                        self.link(service["slug"], proof_slug, "proves", note="seeded proof map")
 
     # ── validation ───────────────────────────────────────────────────────
 
@@ -376,7 +499,7 @@ class Catalog:
         existing = self.get(slug)
         merged: dict[str, Any] = {
             "kind": "PRODUCT", "status": "EXPERIMENTAL", "verified": 0, "name": slug,
-            "audience": "business",
+            "audience": "business", "url": "",
         }
         if existing:
             merged.update({k: v for k, v in existing.items()

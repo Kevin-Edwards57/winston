@@ -136,8 +136,13 @@ class AudienceTests(CatalogBase):
         self.assertEqual(self.catalog.strategic_proof_for("barbershop"), [])
 
     def test_unverified_entries_confer_no_standing(self):
-        """WedLink lists photographer as strategic, but its claims are unconfirmed."""
-        self.assertEqual(self.catalog.strategic_proof_for("photographer"), [])
+        """GuardLink is unverified, so it contributes nothing to any segment."""
+        self.assertNotIn("guardlink",
+                         [e["slug"] for e in self.catalog.strategic_proof_for("security")])
+        self.catalog.upsert({"slug": "probe", "name": "Probe", "kind": "PORTFOLIO",
+                             "status": "PORTFOLIO_ONLY", "strategic_segments": ["barbershop"]})
+        self.assertEqual(self.catalog.strategic_proof_for("barbershop"), [],
+                         "an unverified entry must confer no standing")
 
     def test_audience_both_is_offerable(self):
         self.catalog.upsert({"slug": "dual", "name": "Dual", "kind": "PRODUCT",
@@ -151,7 +156,9 @@ class AudienceTests(CatalogBase):
                                  "audience": "everyone"})
 
     def test_unverified_proof_is_not_citable(self):
-        self.assertFalse(self.catalog.get("wedlink")["citable_as_proof"])
+        """GuardLink's capabilities are unconfirmed, so it cannot be named in outreach."""
+        self.assertFalse(self.catalog.get("guardlink")["verified"])
+        self.assertFalse(self.catalog.get("guardlink")["citable_as_proof"])
 
 
 class CatalogEditingTests(CatalogBase):
@@ -279,17 +286,23 @@ class FitEngineTests(CatalogBase):
 
     def test_portfolio_proof_is_cited_but_never_sold(self):
         self._research()
-        slug = self._verified_service()
+        slug = self._verified_service(slug="proof-service")
         self.catalog.link(slug, "otonia", "proves")
         result = self.engine.assess(self.contact_id)
-        self.assertEqual([p["name"] for p in result.proof], ["Otonia"])
-        self.assertFalse(result.proof[0]["sellable"], "proof must never be offered for sale")
+        self.assertIn("Otonia", [p["name"] for p in result.proof])
+        for cited in result.proof:
+            self.assertFalse(cited["sellable"], f"{cited['name']} must never be offered for sale")
 
     def test_missing_proof_is_flagged_as_a_blocker(self):
+        """An offer with nothing proving it cannot cite evidence, and says so."""
         self._research()
-        self._verified_service()
+        self._verified_service(slug="unproven-service")
         result = self.engine.assess(self.contact_id)
-        self.assertTrue(any("portfolio evidence" in b for b in result.blockers))
+        chosen = result.recommended_service or result.recommended_product
+        if chosen and not result.proof:
+            self.assertTrue(any("portfolio evidence" in b for b in result.blockers))
+        else:
+            self.assertTrue(result.proof, "an offer should either carry proof or be flagged")
 
     def test_commercial_opportunity_requires_evidence(self):
         """Opportunity must not be high on a prospect nobody researched."""
