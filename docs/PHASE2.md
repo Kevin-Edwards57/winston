@@ -376,3 +376,71 @@ Every decision records what was skipped and why.
 
 `performance()` reports success rate, latency, and cost per provider and task from
 `provider_usage`, which records every call. Total AI cost to date: **$0.00**.
+
+---
+
+## Zero-cost mode
+
+`winston/costs.py`. A surprise AI bill is made structurally impossible rather than
+merely unlikely.
+
+### The gate
+
+Before any metered provider runs, the estimated cost of the call is compared against
+what remains of that provider's monthly budget. Default budgets are **$0** and paid
+providers default to **disabled**, so a freshly configured Winston cannot spend money
+even with an API key sitting in the environment.
+
+Two independent gates must both be open before a paid call happens:
+
+1. `WINSTON_ZERO_COST_MODE=false`
+2. That provider explicitly enabled with a budget above zero
+
+Turning off zero-cost mode is not authorisation to spend. It only makes spending
+possible.
+
+### Unknown cost means refused
+
+    If the cost of a call cannot be estimated, the call is refused.
+
+Not attempted and monitored. Not logged and allowed. An unknown cost is treated as
+unbounded, because the failure mode being prevented is discovering the charge
+afterwards. `IndeterminateCost` is a distinct exception from `BudgetExceeded` for
+exactly this reason.
+
+Estimates are deliberately conservative: over-estimating refuses a call that would have
+been affordable, while under-estimating produces the bill this module exists to prevent.
+
+### Budget is a routing constraint
+
+Exhaustion is checked during routing, not at call time, so a provider with no remaining
+budget is simply unroutable. Budget exhaustion therefore surfaces as a refusal with a
+reason rather than as an invoice.
+
+### Local failure stays local
+
+`local_alternatives()` returns only `cost_class == "free"` providers. Ollama being
+briefly unreachable is an infrastructure problem, and answering it by sending prospect
+data to a paid API would convert a transient outage into a recurring bill.
+
+### Free tiers are not free forever
+
+Gemini carries a requests-per-day ceiling alongside its $0 budget, because exceeding a
+free tier is precisely how a free provider produces a charge.
+
+### Current position
+
+```
+AI cost today:        $0.00
+AI cost this month:   $0.00
+Projected this month: $0.00
+zero_cost:            true
+
+Local:   ollama  unmetered  enabled
+Cloud:   gemini  $0.00/mo   disabled
+         claude  $0.00/mo   disabled
+
+Providers able to spend: none
+```
+
+`GET /costs` reports this. The only recurring cost is the VPS.

@@ -28,6 +28,7 @@ from winston.pipeline import OutreachPipeline
 from winston.pricing import PricingEngine, NoPricingBasis
 from winston.ratecard import RateCard
 from winston.providers import ProviderRegistry
+from winston.costs import BudgetGuard
 
 load_dotenv()
 
@@ -45,7 +46,9 @@ fit_engine = FitEngine(repository, catalog, signal_store)
 rate_card = RateCard(repository, catalog)
 rate_card.initialize()
 pricing_engine = PricingEngine(repository, catalog, rate_card)
-provider_registry = ProviderRegistry(repository, ai_service)
+budget_guard = BudgetGuard(repository)
+budget_guard.initialize()
+provider_registry = ProviderRegistry(repository, ai_service, budget_guard)
 writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
@@ -1288,6 +1291,26 @@ def ratecard_calibrate(slug):
     return jsonify(rate_card.calibrate_from_outcomes(slug))
 
 
+@app.route('/costs')
+def costs_dashboard():
+    """AI spend, made visible rather than assumed."""
+    return jsonify(budget_guard.dashboard())
+
+
+@app.route('/costs/budget', methods=['POST'])
+def costs_set_budget():
+    """Raising a budget above zero is the moment Winston becomes able to spend."""
+    body = request.get_json(silent=True) or {}
+    try:
+        entry = budget_guard.set_budget(
+            body.get("provider", ""),
+            monthly_budget_usd=float(body.get("monthly_budget_usd", 0)),
+            enabled=body.get("enabled"), actor="operator")
+    except (ValueError, TypeError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "budget": entry})
+
+
 @app.route('/providers')
 def providers_summary():
     """Routing policy, provider availability, and measured performance."""
@@ -1468,6 +1491,8 @@ def health():
             "rate_card": rate_card.status(),
             "pricing": pricing_engine.readiness(),
             "routing": {"usable_providers": provider_registry.summary()["usable_providers"]},
+            "ai_cost": budget_guard.dashboard()["ai_cost"],
+            "spend_capable_providers": budget_guard.dashboard()["spend_capable_providers"],
         })
     except Exception:
         return jsonify({"status": "degraded", "database": "unavailable"}), 503

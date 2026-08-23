@@ -245,8 +245,13 @@ class RoutingTests(RoutingBase):
         self.assertTrue(any(s["key"] == "claude" and "zero-cost" in s["why"]
                             for s in decision.skipped))
 
-    def test_paid_escalation_is_possible_and_labelled_when_allowed(self):
+    def test_paid_escalation_needs_both_gates_open(self):
+        """Zero-cost mode off is necessary but not sufficient; a budget is also required."""
         registry = self._registry(keys=("ollama:qwen3:8b", "claude"), zero_cost=False)
+        self.assertIsNone(registry.route("proposal_generation").chosen,
+                          "a $0 budget must still block a paid provider")
+
+        registry.budget.set_budget("claude", monthly_budget_usd=5.0, enabled=True)
         decision = registry.route("proposal_generation")
         self.assertEqual(decision.chosen, "claude")
         self.assertTrue(decision.escalated)

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .costs import BudgetGuard
 from .repository import WinstonRepository, utc_now
 
 
@@ -142,9 +143,11 @@ def classify_task(purpose: str) -> TaskClass:
 class ProviderRegistry:
     """Chooses the cheapest provider that can actually do the job."""
 
-    def __init__(self, repository: WinstonRepository, ai_service: Any) -> None:
+    def __init__(self, repository: WinstonRepository, ai_service: Any,
+                 budget: BudgetGuard | None = None) -> None:
         self.repository = repository
         self.ai_service = ai_service
+        self.budget = budget or BudgetGuard(repository)
 
     # ── policy ───────────────────────────────────────────────────────────
 
@@ -203,8 +206,14 @@ class ProviderRegistry:
 
     # ── routing ──────────────────────────────────────────────────────────
 
-    def route(self, purpose: str) -> RoutingDecision:
-        """Pick a provider for one task without calling it."""
+    def route(self, purpose: str, *, estimated_input_tokens: int = 1500,
+              estimated_output_tokens: int = 500) -> RoutingDecision:
+        """Pick a provider for one task without calling it.
+
+        Token estimates exist so a paid provider can be budget-checked *before* it is
+        selected. A provider that cannot afford the call is never chosen, which is why
+        budget exhaustion produces a refusal rather than an invoice.
+        """
         task_class = classify_task(purpose)
         order = self.policy().get(task_class.value, [])
         availability = {row["key"]: row for row in self.availability()}
@@ -223,6 +232,16 @@ class ProviderRegistry:
                 decision.skipped.append({"key": key, "why": row.get("blocked_reason") or "unusable"})
                 continue
 
+            # Budget is a routing constraint, not an afterthought. A provider with no
+            # remaining budget is unroutable, so exhaustion cannot surface as a bill.
+            if capability.paid or capability.cost_class == "free_tier":
+                verdict = self.budget.check(
+                    capability.provider,
+                    input_tokens=estimated_input_tokens, output_tokens=estimated_output_tokens)
+                if not verdict.allowed:
+                    decision.skipped.append({"key": key, "why": verdict.reason})
+                    continue
+
             decision.chosen = key
             decision.escalated = index > 0
             decision.reason = (
@@ -236,6 +255,18 @@ class ProviderRegistry:
             f"No usable provider for a {task_class.value} task. "
             f"Tried: {', '.join(order) or 'nothing configured'}.")
         return decision
+
+    def local_alternatives(self, task_class: TaskClass) -> list[str]:
+        """Local models that can take over when the primary local model fails.
+
+        Deliberately local-only. Ollama being briefly unreachable is an infrastructure
+        problem, and answering it by sending prospect data to a paid API would convert
+        a transient outage into a recurring bill.
+        """
+        usable = {row["key"] for row in self.availability() if row["usable"]}
+        return [key for key, capability in CAPABILITIES.items()
+                if capability.cost_class == "free" and capability.handles(task_class)
+                and key in usable]
 
     def generate(self, prompt: str, *, purpose: str, system: str = "",
                  max_tokens: int = 400) -> Any:
@@ -284,6 +315,8 @@ class ProviderRegistry:
             "availability": self.availability(),
             "performance": performance,
             "total_ai_cost_usd": round(total_cost, 4),
+            "budgets": self.budget.budgets(),
+            "spend_capable_providers": self.budget.dashboard()["spend_capable_providers"],
             "usable_providers": [r["key"] for r in self.availability() if r["usable"]],
             "task_classes": {t.value: sorted(
                 p for p, c in TASK_CLASSIFICATION.items() if c is t) for t in TaskClass},
