@@ -110,10 +110,26 @@ python3 -m winston.migration --database winston.db
 Run Winston:
 
 ```bash
-python winston_app.py
+./start.sh
 ```
 
-Open the dashboard at http://localhost:5000
+That kills any previous run, starts the server, waits until it answers, and opens the
+dashboard. To stop it: `./stop.sh`
+
+The port defaults to 5001 because macOS ControlCenter (AirPlay Receiver) occupies 5000.
+Override with `WINSTON_PORT`.
+
+<details>
+<summary>Running it manually</summary>
+
+
+```bash
+python3 winston_app.py
+```
+
+Then open http://localhost:5001
+
+</details>
 
 Check application/database health at http://localhost:5000/health.
 
