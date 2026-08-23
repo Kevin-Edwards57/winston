@@ -23,6 +23,7 @@ EMAIL = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # documentation examples, and test fixtures.
 ALLOWED = re.compile(
     rb"(example\.(com|org|net)"           # RFC 2606 documentation domains
+    rb"|\.example\b"                   # RFC 2606 reserved .example TLD
     rb"|@yardlinkstudio|yardlinkstudio\.com"  # YardLink's own identity
     rb"|deankevin14@"                      # repository owner
     rb"|your_gmail|user@|test@|noreply@"   # placeholders
