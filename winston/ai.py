@@ -150,10 +150,17 @@ class AIService:
     def from_environment(cls, repository: WinstonRepository) -> "AIService":
         enabled = os.getenv("WINSTON_ENABLE_CLAUDE", "false").strip().casefold() == "true"
         zero_cost = os.getenv("WINSTON_ZERO_COST_MODE", "true").strip().casefold() != "false"
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         providers: list[AIProvider] = [
-            GeminiProvider(os.getenv("GEMINI_API_KEY", ""), os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")),
-            OllamaProvider(os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"), os.getenv("OLLAMA_MODEL", "qwen3:8b")),
-            ClaudeProvider(os.getenv("ANTHROPIC_KEY", ""), os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"), enabled),
+            GeminiProvider(os.getenv("GEMINI_API_KEY", ""),
+                           os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")),
+            OllamaProvider(base_url, os.getenv("OLLAMA_MODEL", "qwen3:8b")),
+            # Registered so the router has a genuine light tier. Classification and
+            # extraction do not need an 8B model, and a 3B one answers in a fraction
+            # of the time for the same result.
+            OllamaProvider(base_url, os.getenv("OLLAMA_LIGHT_MODEL", "llama3.2:3b")),
+            ClaudeProvider(os.getenv("ANTHROPIC_KEY", ""),
+                           os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"), enabled),
         ]
         return cls(repository, providers, zero_cost_mode=zero_cost)
 

@@ -123,7 +123,11 @@ class Adjustment:
 
 @dataclass
 class PriceBand:
-    """An explainable price range."""
+    """An explainable price range.
+
+    ``basis`` travels with the number so nothing downstream can present an operator
+    assumption as though it were derived from completed engagements.
+    """
     floor_usd: float
     target_usd: float
     premium_usd: float
@@ -133,6 +137,10 @@ class PriceBand:
     hourly_rate: float = 0.0
     delivery_cost_usd: float = 0.0
     margin_at_target: float = 0.0
+    basis: str = "operator_assumption"
+    basis_label: str = "Operator assumption, not market data"
+    evidence_backed: bool = False
+    sample_size: int = 0
     adjustments: list[Adjustment] = field(default_factory=list)
     scope_assumptions: list[str] = field(default_factory=list)
     rationale: list[str] = field(default_factory=list)
@@ -149,6 +157,8 @@ class PriceBand:
             "hourly_rate": self.hourly_rate,
             "delivery_cost_usd": round(self.delivery_cost_usd, 2),
             "margin_at_target": round(self.margin_at_target, 3),
+            "basis": self.basis, "basis_label": self.basis_label,
+            "evidence_backed": self.evidence_backed, "sample_size": self.sample_size,
             "adjustments": [a.as_dict() for a in self.adjustments],
             "scope_assumptions": self.scope_assumptions,
             "rationale": self.rationale,
@@ -180,9 +190,11 @@ def validate_pricing_inputs(features: dict[str, Any]) -> dict[str, Any]:
 class PricingEngine:
     """Produces price bands from scope, effort, and a configured rate card."""
 
-    def __init__(self, repository: WinstonRepository, catalog: Any) -> None:
+    def __init__(self, repository: WinstonRepository, catalog: Any,
+                 rate_card: Any = None) -> None:
         self.repository = repository
         self.catalog = catalog
+        self.rate_card_store = rate_card
 
     # ── configuration ────────────────────────────────────────────────────
 
@@ -284,11 +296,31 @@ class PricingEngine:
                 "No hourly rate configured. Set it with POST /pricing/configure before "
                 "Winston can quote anything.")
 
-        low, high = offer.get("effort_hours_min"), offer.get("effort_hours_max")
+        # A rate card entry must exist AND be enabled. Having a starting number is not
+        # a decision to sell the service, so a disabled entry refuses to quote.
+        slug = offer.get("slug", "")
+        entry = self.rate_card_store.get(slug) if self.rate_card_store else None
+        basis, basis_label, evidence_backed, sample = (
+            "operator_assumption", "Operator assumption, not market data", False, 0)
+        if entry is not None:
+            if not entry.enabled:
+                raise NoPricingBasis(
+                    f"{offer.get('name', slug)} has a rate card entry but it is disabled. "
+                    "Enable it with POST /ratecard/<slug>/enable once YardLink actually "
+                    "offers the service.")
+            basis = entry.price_basis.value
+            basis_label = entry.price_basis.label
+            evidence_backed = entry.price_basis.is_evidence_backed
+            sample = entry.sample_size
+
+        low = (entry.effort_hours_min if entry and entry.has_effort
+               else offer.get("effort_hours_min"))
+        high = (entry.effort_hours_max if entry and entry.has_effort
+                else offer.get("effort_hours_max"))
         if not low or not high:
             raise NoPricingBasis(
                 f"{offer.get('name', 'This service')} has no effort estimate. Add "
-                "effort_hours_min and effort_hours_max to the catalogue entry.")
+                "effort_hours_min and effort_hours_max to its rate card entry.")
 
         features, assumptions = self.derive_scope(problems, signals or {}, offer)
         base_hours = (float(low) + float(high)) / 2
@@ -313,20 +345,46 @@ class PricingEngine:
 
         hours = base_hours * multiplier
         cost = hours * float(rate)
-        floor = cost * (1 + float(card["min_margin"]))
-        target = floor * float(card["target_uplift"])
-        premium = target * float(card["premium_uplift"])
+
+        if entry is not None and entry.has_price:
+            # The band already encodes a typical engagement, so scope multipliers may
+            # only push a price UP. Discounting a fixed band for "low complexity"
+            # double-counts scope that the operator already priced in, and drove the
+            # target below delivery cost in testing.
+            uplift = max(1.0, multiplier)
+            floor = float(entry.price_floor_usd or entry.price_target_usd)
+            target = max(float(entry.price_target_usd) * uplift, floor)
+            premium = max(float(entry.price_premium_usd or entry.price_target_usd) * uplift, target)
+            rationale_source = f"Rate card band for {offer.get('name')}, {basis_label.lower()}"
+        else:
+            floor = cost * (1 + float(card["min_margin"]))
+            target = floor * float(card["target_uplift"])
+            premium = target * float(card["premium_uplift"])
+            rationale_source = "Derived from delivery cost and the configured minimum margin"
+
+        # Rounding, because manufactured precision reads as false confidence.
+        floor, target, premium = (round(v / 25) * 25 for v in (floor, target, premium))
+
+        if target < cost:
+            raise NoPricingBasis(
+                f"The rate card is internally inconsistent for {offer.get('name')}. Target "
+                f"${target:,.0f} is below the ${cost:,.0f} delivery cost implied by "
+                f"{hours:.0f}h at ${rate:.0f}/h. Either the price is too low, the effort "
+                f"estimate is too high, or the internal rate is too high for this service.")
 
         # Confidence tracks the evidence the scope was read from, not the arithmetic.
         historical = self._comparable_count(offer.get("slug", ""))
         confidence = min(0.4 + evidence_confidence * 0.4 + min(historical, 5) * 0.04, 0.95)
 
         rationale = [
-            f"Base effort {base_hours:.0f}h from the catalogue entry for {offer.get('name')}",
+            rationale_source,
+            f"Base effort {base_hours:.0f}h from the rate card for {offer.get('name')}",
             f"Adjusted to {hours:.0f}h by {multiplier:.2f}x from observed scope",
             f"Delivery cost {hours:.0f}h x ${rate:.0f}/h = ${cost:,.0f}",
-            f"Floor holds the configured {float(card['min_margin']):.0%} minimum margin",
         ]
+        if not evidence_backed:
+            rationale.append(
+                "This price is an operator assumption. No completed engagement supports it.")
         if historical:
             rationale.append(f"{historical} comparable past engagement(s) informed confidence")
         else:
@@ -337,6 +395,8 @@ class PricingEngine:
             confidence=confidence, effort_hours=hours, hourly_rate=float(rate),
             delivery_cost_usd=cost,
             margin_at_target=(target - cost) / target if target else 0.0,
+            basis=basis, basis_label=basis_label, evidence_backed=evidence_backed,
+            sample_size=sample,
             adjustments=adjustments, scope_assumptions=assumptions, rationale=rationale)
 
     def _comparable_count(self, offer_slug: str) -> int:

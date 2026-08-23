@@ -280,3 +280,99 @@ YardLink's actual delivery costs or won deals, because neither exists yet. Absol
 prices are driven almost entirely by the effort estimates in the catalogue. A service
 estimated at 10 hours prices very differently from one estimated at 30, and that estimate
 is the operator's to set.
+
+---
+
+## Phase B.5 · Commercial calibration
+
+`winston/ratecard.py`. Operator-editable commercial parameters where provenance is
+structural rather than a comment.
+
+### Basis travels with the number
+
+Every price and effort value carries a `Basis`:
+
+| Basis | Meaning | Evidence backed |
+|---|---|---|
+| `OPERATOR_ASSUMPTION` | A starting point someone chose | No |
+| `OBSERVED` | Quoted in real proposals, outcomes unknown | No |
+| `HISTORICAL` | Derived from completed engagements | Yes |
+| `CALIBRATED` | Adjusted from measured close rates and margins | Yes |
+
+The basis travels into the pricing engine, the API, and the review screen. Only
+`calibrate_from_outcomes()` can raise it, and it refuses below eight closed engagements.
+An operator editing a price **drops** the basis back to assumption, because typing a
+number is asserting a judgement, not reporting a measurement.
+
+Every entry is currently `OPERATOR_ASSUMPTION`. `GET /ratecard` says so in a `warning`
+field rather than leaving it to be inferred.
+
+### Having a price is not a decision to sell
+
+Starter entries seed **disabled**. The pricing engine refuses to quote a disabled
+service even when a price exists. Enabling requires both a target price and an effort
+range.
+
+### The starter card is internally checkable
+
+The engine refuses when a configured price sits below the delivery cost its own effort
+estimate implies, and names the three ways to resolve it. That check found a real
+inconsistency: the seeded rates are healthy at a $40 to $60 internal hourly rate and
+unprofitable above roughly $95 on the larger services.
+
+| Service | Target | Effort | @$40/h | @$60/h | @$85/h | @$110/h |
+|---|---|---|---|---|---|---|
+| website-service | $950 | 8-15h | 59% | 38% | 13% | loss |
+| website-redesign | $1,100 | 8-18h | 60% | 40% | 15% | loss |
+| ai-chatbots | $950 | 6-18h | 57% | 36% | 9% | loss |
+| landing-pages | $450 | 3-6h | 66% | 49% | 28% | 7% |
+
+Scope multipliers may only raise a banded price, never lower it. Discounting a fixed
+band for "low complexity" double-counts scope the operator already priced in, and drove
+a target below delivery cost during testing.
+
+Prices round to the nearest $25. Manufactured precision reads as false confidence.
+
+---
+
+## Phase C · Provider registry and routing
+
+`winston/providers.py`. Routing by task difficulty, with escalation as a decision.
+
+### Task classes
+
+| Class | Work | Default route |
+|---|---|---|
+| `LIGHT` | classification, extraction, parsing | `llama3.2:3b` |
+| `MEDIUM` | audits, drafting, synthesis | `qwen3:8b` |
+| `HEAVY` | ambiguous reasoning, strategy | `qwen3:8b`, then cloud |
+| `CRITICAL` | customer-facing commercial output | strongest configured |
+
+Unknown purposes default to `MEDIUM`. The policy lives in settings and is editable;
+invalid task classes and unknown provider keys are rejected.
+
+`llama3.2:3b` is now registered as a second Ollama provider so the light tier is real
+rather than notional. `AIService` previously instantiated only one Ollama model.
+
+### Two invariants
+
+**No silent paid escalation.** A paid provider is reachable only when zero-cost mode is
+off. A free tier failing does not authorise spending money, and when Claude is selected
+the decision records "Paid provider selected deliberately."
+
+**Routing does not affect Guardian.** A stronger model decides who writes the text, not
+whether the text may reach a prospect.
+
+### Refusal over downgrade
+
+With the current environment, `proposal_generation` routes to **nothing**: Gemini is
+unconfigured, `qwen3:8b` is not marked suitable for critical work, and Claude is blocked
+by zero-cost mode. Winston declines rather than quietly handling customer-facing
+commercial output with a model not trusted for it.
+
+Every decision records what was skipped and why.
+
+### Measured, not declared
+
+`performance()` reports success rate, latency, and cost per provider and task from
+`provider_usage`, which records every call. Total AI cost to date: **$0.00**.

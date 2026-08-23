@@ -26,6 +26,8 @@ from winston.writer import Writer
 from winston.guardian import Guardian
 from winston.pipeline import OutreachPipeline
 from winston.pricing import PricingEngine, NoPricingBasis
+from winston.ratecard import RateCard
+from winston.providers import ProviderRegistry
 
 load_dotenv()
 
@@ -40,7 +42,10 @@ signal_store.initialize()
 catalog = Catalog(repository)
 catalog.initialize()
 fit_engine = FitEngine(repository, catalog, signal_store)
-pricing_engine = PricingEngine(repository, catalog)
+rate_card = RateCard(repository, catalog)
+rate_card.initialize()
+pricing_engine = PricingEngine(repository, catalog, rate_card)
+provider_registry = ProviderRegistry(repository, ai_service)
 writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
@@ -1246,6 +1251,64 @@ def generate_draft(contact_id):
         return jsonify({"error": "Unknown contact"}), 404
 
 
+@app.route('/ratecard')
+def ratecard_list():
+    """Commercial parameters with their provenance. Nothing here is market data."""
+    return jsonify({
+        "entries": [e.as_dict() for e in rate_card.list()],
+        "status": rate_card.status(),
+    })
+
+
+@app.route('/ratecard', methods=['POST'])
+def ratecard_upsert():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"success": True, "entry": rate_card.upsert(payload, actor="operator").as_dict()})
+    except (ValueError, KeyError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
+@app.route('/ratecard/<slug>/enable', methods=['POST'])
+def ratecard_enable(slug):
+    """Having a price is not a decision to sell. This is that decision."""
+    body = request.get_json(silent=True) or {}
+    try:
+        entry = rate_card.enable(slug, enabled=bool(body.get("enabled", True)), actor="operator")
+    except KeyError:
+        return jsonify({"success": False, "error": "No rate card entry"}), 404
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "entry": entry.as_dict()})
+
+
+@app.route('/ratecard/<slug>/calibrate', methods=['POST'])
+def ratecard_calibrate(slug):
+    """Raise a price basis from assumption to evidence, when the data supports it."""
+    return jsonify(rate_card.calibrate_from_outcomes(slug))
+
+
+@app.route('/providers')
+def providers_summary():
+    """Routing policy, provider availability, and measured performance."""
+    return jsonify(provider_registry.summary())
+
+
+@app.route('/providers/route/<purpose>')
+def providers_route(purpose):
+    """Which provider would handle this task, and why."""
+    return jsonify(provider_registry.route(purpose).as_dict())
+
+
+@app.route('/providers/policy', methods=['POST'])
+def providers_policy():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"success": True, "policy": provider_registry.set_policy(body)})
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 @app.route('/pricing')
 def pricing_readiness():
     """What Winston needs before it can quote anything."""
@@ -1401,6 +1464,10 @@ def health():
             "provider_health": status["health"],
             "misconfigured_providers": status["misconfigured"],
             "funnel": ledger.funnel(),
+            "catalogue": catalog.readiness(),
+            "rate_card": rate_card.status(),
+            "pricing": pricing_engine.readiness(),
+            "routing": {"usable_providers": provider_registry.summary()["usable_providers"]},
         })
     except Exception:
         return jsonify({"status": "degraded", "database": "unavailable"}), 503
