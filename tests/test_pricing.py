@@ -116,13 +116,25 @@ class RefusalTests(PricingBase):
         readiness = self.engine.readiness()
         self.assertFalse(readiness["can_quote"])
         self.assertTrue(any("hourly_rate" in m for m in readiness["missing"]))
-        self.assertGreater(readiness["services_without_effort"], 0)
+        self.assertEqual(readiness["quotable_count"], 0)
 
-    def test_readiness_clears_once_configured(self):
-        self._ready()
-        readiness = self.engine.readiness()
-        self.assertGreaterEqual(readiness["services_with_effort"], 1)
-        self.assertIsNotNone(readiness["rate_card"]["hourly_rate_usd"])
+    def test_readiness_reflects_what_can_actually_be_quoted(self):
+        """Readiness must agree with quote(). Reporting false while quoting fine is
+        a worse failure than being unable to quote at all."""
+        from winston.ratecard import RateCard
+        card = RateCard(self.repo, self.catalog)
+        card.initialize()
+        engine = PricingEngine(self.repo, self.catalog, card)
+        engine.configure(hourly_rate_usd=50, min_margin=0.35)
+        self.catalog.verify("website-service")
+
+        self.assertFalse(engine.readiness()["can_quote"], "nothing is enabled yet")
+        card.enable("website-service")
+
+        readiness = engine.readiness()
+        self.assertTrue(readiness["can_quote"])
+        self.assertIn("website-service", readiness["quotable_services"])
+        engine.quote(offer=self.catalog.get("website-service"), problems=self.problems)
 
     def test_rejects_a_nonsensical_rate(self):
         with self.assertRaises(ValueError):

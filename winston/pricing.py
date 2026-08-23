@@ -220,24 +220,42 @@ class PricingEngine:
         return self.rate_card()
 
     def readiness(self) -> dict[str, Any]:
-        """What is missing before Winston can quote anything."""
+        """What is missing before Winston can quote anything.
+
+        Effort estimates live on the rate card, not the catalogue. An earlier version
+        checked the catalogue and reported can_quote false while quoting perfectly well,
+        which is a worse failure than being unable to quote: the system was lying about
+        its own state.
+        """
         card = self.rate_card()
         missing = []
         if not card["hourly_rate_usd"]:
             missing.append("pricing_hourly_rate_usd is not configured")
 
-        priced = unpriced = 0
-        for entry in self.catalog.list(kind="SERVICE"):
-            if entry.get("effort_hours_min") and entry.get("effort_hours_max"):
-                priced += 1
-            else:
-                unpriced += 1
-        if unpriced:
-            missing.append(f"{unpriced} service(s) have no effort estimate")
+        quotable, blocked = [], []
+        if self.rate_card_store is not None:
+            for entry in self.rate_card_store.list():
+                if entry.enabled and entry.has_price and entry.has_effort:
+                    quotable.append(entry.slug)
+                elif entry.enabled:
+                    blocked.append({"slug": entry.slug, "why": "enabled but incomplete"})
+        else:
+            for entry in self.catalog.list(kind="SERVICE"):
+                if entry.get("effort_hours_min") and entry.get("effort_hours_max"):
+                    quotable.append(entry["slug"])
 
-        return {"rate_card": card, "services_with_effort": priced,
-                "services_without_effort": unpriced, "missing": missing,
-                "can_quote": not missing}
+        if not quotable:
+            missing.append("no rate card entry is enabled with both a price and an effort "
+                           "estimate")
+
+        return {
+            "rate_card": card,
+            "quotable_services": quotable,
+            "quotable_count": len(quotable),
+            "enabled_but_incomplete": blocked,
+            "missing": missing,
+            "can_quote": not missing,
+        }
 
     # ── scope ────────────────────────────────────────────────────────────
 
