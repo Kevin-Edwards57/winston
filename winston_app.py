@@ -16,8 +16,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from winston.repository import WinstonRepository
+from winston.repository import WinstonRepository, utc_now
 from winston.ai import AIService, ProviderError
+from winston.commercial import CommercialLedger
 
 load_dotenv()
 
@@ -25,6 +26,8 @@ app = Flask(__name__)
 repository = WinstonRepository(os.getenv("WINSTON_DATABASE", "winston.db"))
 repository.initialize()
 ai_service = AIService.from_environment(repository)
+ledger = CommercialLedger(repository)
+ledger.initialize()
 json_write_lock = threading.RLock()
 
 # ============================================================
@@ -876,9 +879,8 @@ def run_scan(searches):
                 if body:
                     b["email"]   = email
                     b["phone"]   = phone
-                    b["draft"]   = body
-                    b["subject"] = subject
                     b["social"]  = social
+                    persist_draft(b, subject, body)
                     state["pending"].append(b)
                     queued_emails.add(email_key)
                     total_email_leads += 1
@@ -918,6 +920,43 @@ def run_scan(searches):
 
     state["status"] = "idle"
     log(f"Done. {total_email_leads} email leads, {total_social_leads} social leads. Let's go Kevin.")
+
+def persist_draft(business: dict, subject: str, body: str) -> str:
+    """Write a generated draft to SQLite immediately.
+
+    Drafts used to reach the database only when a human clicked Approve, so an
+    unreviewed queue lived solely in ``state["pending"]`` and died with the process.
+    Persisting at generation time makes the in-memory list a cache of the drafts
+    table rather than the only copy.
+    """
+    contact_id, _ = repository.upsert_contact(business, business.get("source", "scan"))
+    draft_id = repository.create_draft(contact_id, subject, body)
+    business.update({"contact_id": contact_id, "draft_id": draft_id,
+                     "subject": subject, "draft": body, "workflow_stage": "draft"})
+    return draft_id
+
+
+def rehydrate_pending_queue() -> int:
+    """Rebuild the review queue from SQLite on startup."""
+    restored = []
+    for row in repository.pending_drafts():
+        restored.append({
+            "contact_id": row["contact_id"], "draft_id": row["draft_id"],
+            "place_id": row.get("place_id") or "", "name": row.get("name") or "",
+            "email": row.get("email") or "", "phone": row.get("phone") or "",
+            "website": row.get("website") or "", "address": row.get("address") or "",
+            "type": row.get("business_type") or "business",
+            "subject": row.get("subject") or "", "draft": row.get("body") or "",
+            "workflow_stage": row.get("stage") or "draft",
+            "social": {"instagram": row.get("instagram") or "",
+                       "facebook": row.get("facebook") or "",
+                       "tiktok": row.get("tiktok") or ""},
+        })
+    state["pending"] = restored
+    if restored:
+        log(f"Restored {len(restored)} pending drafts from the database")
+    return len(restored)
+
 
 def run_existing_contact_drafts(limit: int):
     """Create a bounded, zero-discovery-cost review batch from migrated contacts."""
@@ -1820,6 +1859,19 @@ def confirm_send(job_id):
             return jsonify({"success": False, "error": "Job unavailable or recipient suppressed"}), 409
         success = send_email_fn(job["email"], job["name"], job["body"], job["subject"])
         repository.complete_send(job_id, success=success, error="SMTP delivery failed" if not success else "")
+
+        # Record the attempt in the commercial ledger regardless of outcome. A failed
+        # send is as much a fact worth learning from as a successful one.
+        campaign_id = ledger.ensure_campaign(
+            os.getenv("WINSTON_CAMPAIGN", "default"), "Default outreach",
+            objective="Ongoing YardLink prospecting")
+        message_id = ledger.record_message(
+            contact_id=job["contact_id"], to_email=job["email"], subject=job["subject"],
+            body=job["body"], campaign_id=campaign_id, draft_id=job["draft_id"],
+            send_job_id=job_id, sent_at=utc_now() if success else None, source="winston:confirm_send")
+        ledger.record_message_event(message_id, "sent" if success else "failed",
+                                    detail={"dry_run": WINSTON_DRY_RUN})
+
         if not success:
             return jsonify({"success": False, "error": "SMTP delivery failed"}), 502
         emailed = load_emailed()
@@ -1866,12 +1918,51 @@ def run_followups():
                  "through the draft/approve/queue/confirm state machine.",
     }), 410
 
+@app.route('/funnel')
+def funnel():
+    """Commercial outcomes. Rates report null where nothing has measured them yet."""
+    campaign = request.args.get("campaign_id")
+    return jsonify(ledger.funnel(campaign))
+
+
+@app.route('/prospects/<contact_id>/history')
+def prospect_history(contact_id):
+    return jsonify(ledger.contact_history(contact_id))
+
+
+@app.route('/inbox/scan', methods=['POST'])
+def inbox_scan():
+    """Read-only inbox pass: records replies, bounces, and unsubscribes.
+
+    Hard bounces and unsubscribe requests suppress the address immediately. Nothing
+    is deleted and messages are left unread.
+    """
+    from winston.inbox import InboxScanner
+    limit = max(1, min(request.get_json(silent=True).get("limit", 200)
+                       if request.get_json(silent=True) else 200, 500))
+    try:
+        summary = InboxScanner(repository, ledger, ai_service).scan(limit=limit)
+        log(f"Inbox scan: {summary['replies']} replies, {summary['hard_bounces']} hard bounces, "
+            f"{summary['unsubscribes']} unsubscribes")
+        return jsonify({"success": True, **summary})
+    except RuntimeError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+
 @app.route('/health')
 def health():
     try:
         counts = repository.counts()
-        return jsonify({"status": "ok", "database": "ok", "counts": counts,
-                        "automatic_followups": False, "ai_mode": ai_service.status()["mode"]})
+        status = ai_service.status()
+        return jsonify({
+            "status": "ok", "database": "ok", "counts": counts,
+            "legacy_followup_sender": "removed",
+            "dry_run": WINSTON_DRY_RUN,
+            "ai_mode": status["mode"],
+            "provider_health": status["health"],
+            "misconfigured_providers": status["misconfigured"],
+            "funnel": ledger.funnel(),
+        })
     except Exception:
         return jsonify({"status": "degraded", "database": "unavailable"}), 503
 
@@ -1889,6 +1980,7 @@ if __name__ == '__main__':
     stats = load_stats()
     state["emails_sent"] = stats.get("emails_sent", 0)
     state["social_pending"] = load_social_leads()
+    rehydrate_pending_queue()
 
     print("\nWinston v2 is starting up...")
     print("Dashboard: http://localhost:5000")

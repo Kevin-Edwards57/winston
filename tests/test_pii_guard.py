@@ -28,7 +28,8 @@ ALLOWED = re.compile(
     rb"|your_gmail|user@|test@|noreply@"   # placeholders
     rb"|info@info\.com|hello@info\.com"    # junk-address blocklist literals
     rb"|info@theirbusiness\.com"           # docstring example
-    rb")"
+    rb")",
+    re.IGNORECASE,
 )
 
 

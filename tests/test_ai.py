@@ -39,13 +39,44 @@ class AIServiceTests(unittest.TestCase):
     def test_gemini_first_then_ollama_fallback(self):
         gemini = FakeProvider("gemini", error="quota")
         ollama = FakeProvider("ollama")
-        result = AIService(self.repo, [gemini, ollama]).generate("hello", purpose="test")
+        result = AIService(self.repo, [gemini, ollama]).generate(
+            "hello", purpose="test", attempts=1)
         self.assertEqual(result.provider, "ollama")
         self.assertEqual(gemini.calls, 1)
         self.assertEqual(ollama.calls, 1)
         summary = self.repo.provider_summary()
         self.assertEqual(summary["gemini"]["successes"], 0)
         self.assertEqual(summary["ollama"]["successes"], 1)
+
+    def test_a_failing_provider_is_retried_before_falling_through(self):
+        """Transient failures should not immediately cost a fallback."""
+        gemini = FakeProvider("gemini", error="timeout")
+        ollama = FakeProvider("ollama")
+        result = AIService(self.repo, [gemini, ollama]).generate(
+            "hello", purpose="test", attempts=3)
+        self.assertEqual(gemini.calls, 3, "the primary provider should be retried")
+        self.assertEqual(result.provider, "ollama")
+
+    def test_retries_do_not_bypass_zero_cost_mode(self):
+        """Retrying must never be a route to a paid provider."""
+        free = FakeProvider("ollama", error="down")
+        paid = FakeProvider("claude", paid=True)
+        service = AIService(self.repo, [free, paid], zero_cost_mode=True)
+        with self.assertRaises(ProviderError):
+            service.generate("hello", attempts=3)
+        self.assertEqual(paid.calls, 0)
+
+    def test_empty_api_key_is_reported_not_silently_skipped(self):
+        from winston.ai import GeminiProvider, OllamaProvider
+        service = AIService(self.repo, [GeminiProvider(""), OllamaProvider()])
+        problems = {p["provider"] for p in service.misconfigured()}
+        self.assertIn("gemini", problems,
+                      "an empty key must surface as a problem, not vanish from routing")
+
+    def test_ollama_disables_thinking(self):
+        """qwen3 returns an empty response with thinking on; 293 failures came from this."""
+        from winston.ai import THINK_DISABLED
+        self.assertIs(THINK_DISABLED, False)
 
     def test_zero_cost_mode_never_calls_paid_provider(self):
         paid = FakeProvider("claude", paid=True)

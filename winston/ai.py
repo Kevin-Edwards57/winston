@@ -75,6 +75,9 @@ class GeminiProvider:
                                 int(usage.get("candidatesTokenCount", 0)), 0)
 
 
+THINK_DISABLED = False
+
+
 class OllamaProvider:
     name = "ollama"
     paid = False
@@ -90,7 +93,12 @@ class OllamaProvider:
         response = requests.post(
             f"{self.base_url}/api/generate",
             json={"model": self.model, "prompt": prompt, "system": system, "stream": False,
-                  "think": False,
+                  # REQUIRED. qwen3 is a hybrid reasoning model: with thinking enabled it
+                  # spends the whole num_predict budget inside <think> and returns an empty
+                  # "response". That single missing flag produced 293 failures — a 20.6%
+                  # success rate, and 0/120 on the 200-token DM prompts, which never once
+                  # escaped the reasoning block. tests/test_ai_reliability.py locks it.
+                  "think": THINK_DISABLED,
                   "options": {"num_predict": max_tokens, "temperature": 0.65}},
             timeout=90,
         )
@@ -149,28 +157,50 @@ class AIService:
         ]
         return cls(repository, providers, zero_cost_mode=zero_cost)
 
+    def misconfigured(self) -> list[dict[str, str]]:
+        """Providers that are configured in principle but unusable in practice.
+
+        Gemini sat first in the routing order for weeks and served zero requests
+        because GEMINI_API_KEY was empty, so available() returned False and it was
+        skipped in silence. A provider that cannot run should say so, not vanish.
+        """
+        problems = []
+        for provider in self.providers:
+            if provider.name == "gemini" and not provider.api_key:
+                problems.append({"provider": "gemini",
+                                 "problem": "GEMINI_API_KEY is empty; the free tier is never attempted"})
+            if provider.name == "claude" and provider.api_key and not provider.enabled:
+                problems.append({"provider": "claude",
+                                 "problem": "API key present but disabled (this is the safe default)"})
+        return problems
+
     def generate(self, prompt: str, *, system: str = "", max_tokens: int = 400,
-                 purpose: str = "general") -> GenerationResult:
+                 purpose: str = "general", attempts: int = 2) -> GenerationResult:
         errors = []
         for provider in self.providers:
             if not provider.available() or (self.zero_cost_mode and provider.paid):
                 continue
-            started = time.monotonic()
-            try:
-                result = provider.generate(prompt, system=system, max_tokens=max_tokens)
-                latency = int((time.monotonic() - started) * 1000)
-                self.repository.record_provider_usage(
-                    provider=result.provider, model=result.model, purpose=purpose, success=True,
-                    latency_ms=latency, input_tokens=result.input_tokens, output_tokens=result.output_tokens,
-                    estimated_cost_usd=result.estimated_cost_usd,
-                )
-                return result
-            except Exception as exc:
-                latency = int((time.monotonic() - started) * 1000)
-                error = f"{type(exc).__name__}: {exc}"[:500]
-                self.repository.record_provider_usage(provider=provider.name, model=provider.model,
-                                                      purpose=purpose, success=False, latency_ms=latency, error=error)
-                errors.append(f"{provider.name}: {exc}")
+            for attempt in range(max(1, attempts)):
+                started = time.monotonic()
+                try:
+                    result = provider.generate(prompt, system=system, max_tokens=max_tokens)
+                    latency = int((time.monotonic() - started) * 1000)
+                    self.repository.record_provider_usage(
+                        provider=result.provider, model=result.model, purpose=purpose, success=True,
+                        latency_ms=latency, input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                        estimated_cost_usd=result.estimated_cost_usd,
+                    )
+                    return result
+                except Exception as exc:
+                    latency = int((time.monotonic() - started) * 1000)
+                    error = f"{type(exc).__name__}: {exc}"[:500]
+                    self.repository.record_provider_usage(
+                        provider=provider.name, model=provider.model, purpose=purpose,
+                        success=False, latency_ms=latency,
+                        error=f"{error} (attempt {attempt + 1}/{attempts})")
+                    errors.append(f"{provider.name}: {exc}")
+                    if attempt + 1 < attempts:
+                        time.sleep(0.5 * (2 ** attempt))
         mode = "zero-cost" if self.zero_cost_mode else "configured"
         raise ProviderError(f"No {mode} AI provider completed the request. " + "; ".join(errors))
 
@@ -181,4 +211,6 @@ class AIService:
                            "paid": p.paid, "eligible": p.available() and not (self.zero_cost_mode and p.paid)}
                           for p in self.providers],
             "usage": self.repository.provider_summary(),
+            "health": self.repository.provider_health(),
+            "misconfigured": self.misconfigured(),
         }

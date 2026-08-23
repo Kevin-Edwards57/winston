@@ -110,7 +110,9 @@ class WinstonRepository:
                 CREATE UNIQUE INDEX IF NOT EXISTS contacts_place_id_unique
                     ON contacts(place_id) WHERE place_id IS NOT NULL AND place_id != '';
                 CREATE UNIQUE INDEX IF NOT EXISTS contacts_email_unique
-                    ON contacts(normalized_email) WHERE normalized_email IS NOT NULL AND normalized_email != '';
+                    ON contacts(normalized_email)
+                    WHERE normalized_email IS NOT NULL AND normalized_email != ''
+                      AND (place_id IS NULL OR place_id = '');
                 CREATE TABLE IF NOT EXISTS drafts (
                     id TEXT PRIMARY KEY,
                     contact_id TEXT NOT NULL REFERENCES contacts(id),
@@ -222,6 +224,18 @@ class WinstonRepository:
                 place_row = connection.execute("SELECT * FROM contacts WHERE place_id = ?", (place_id,)).fetchone()
             if normalized:
                 email_row = connection.execute("SELECT * FROM contacts WHERE normalized_email = ?", (normalized,)).fetchone()
+            # A Google Place ID identifies a business; an email address does not.
+            # Shared platform inboxes -- one booking-platform support address served six
+            # separate barbershops -- and addresses scraped out of embedded font licences
+            # legitimately appear on many unrelated
+            # businesses, so an email match is only an identity match when the matched
+            # row has no Place identity of its own -- i.e. a legacy email-only record
+            # for this same business. When it carries a *different* Place ID it is a
+            # different business sharing an inbox, and merging destroys a real record.
+            if email_row is not None and place_id and (email_row["place_id"] or "").strip() \
+                    and email_row["place_id"] != place_id:
+                email_row = None
+
             if place_row and email_row and place_row["id"] != email_row["id"]:
                 # Two legacy identities converged. Preserve the Place-backed row,
                 # repoint dependent records, and merge the email-backed row.
@@ -260,6 +274,15 @@ class WinstonRepository:
                 return str(row["id"]), False
             contact_id = stable_id("contact", place_id or normalized or payload.get("name", ""), payload.get("address", ""))
             existing_id = connection.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+
+            # A derived id can already be held by a row that was overwritten in place
+            # by an earlier merge. Writing into it again would fold a second business
+            # into a stranger's record, so a genuinely different Place ID gets a fresh
+            # identity instead. 37 contacts were corrupted this way before the guard.
+            if existing_id and place_id and existing_id["place_id"] and existing_id["place_id"] != place_id:
+                contact_id = str(uuid.uuid4())
+                existing_id = None
+
             if existing_id:
                 merged = {key: values[key] or existing_id[key] for key in values}
                 merged["place_id"] = existing_id["place_id"] or values["place_id"]
@@ -463,6 +486,15 @@ class WinstonRepository:
             row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
 
+    def set_setting(self, key: str, value: Any) -> None:
+        with self.transaction(immediate=True) as connection:
+            connection.execute(
+                """INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,
+                                                  updated_at=excluded.updated_at""",
+                (key, json.dumps(value), utc_now()),
+            )
+
     def counts(self) -> dict[str, int]:
         tables = ("contacts", "legacy_import_records", "drafts", "sent_messages", "suppressions", "activity_events", "provider_usage")
         with self.read() as connection:
@@ -483,6 +515,48 @@ class WinstonRepository:
                  error[:500], utc_now()),
             )
         return usage_id
+
+    def provider_health(self, window_days: int = 30) -> list[dict[str, Any]]:
+        """Per-provider reliability, latency, and cost.
+
+        Winston ran for weeks at a 20.6% generation success rate without surfacing
+        it anywhere, because only aggregate counts were recorded. Success rate is a
+        first-class operational metric: an unreliable inference layer silently
+        degrades every engine built on top of it.
+        """
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT provider, model,
+                          COUNT(*) AS calls,
+                          SUM(success) AS successes,
+                          SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures,
+                          ROUND(AVG(CASE WHEN success=1 THEN latency_ms END)) AS avg_latency_ms,
+                          COALESCE(SUM(estimated_cost_usd), 0) AS cost_usd,
+                          MAX(created_at) AS last_call_at
+                   FROM provider_usage
+                   WHERE created_at >= datetime('now', ?)
+                   GROUP BY provider, model
+                   ORDER BY calls DESC""",
+                (f"-{int(window_days)} days",),
+            ).fetchall()
+
+            health = []
+            for row in rows:
+                record = dict(row)
+                calls = record["calls"] or 0
+                record["success_rate"] = round((record["successes"] or 0) / calls, 4) if calls else None
+                record["top_error"] = None
+                if record["failures"]:
+                    error = connection.execute(
+                        """SELECT error, COUNT(*) n FROM provider_usage
+                           WHERE success=0 AND provider=? AND model=?
+                           GROUP BY error ORDER BY n DESC LIMIT 1""",
+                        (record["provider"], record["model"]),
+                    ).fetchone()
+                    if error:
+                        record["top_error"] = {"error": (error["error"] or "")[:200], "count": error["n"]}
+                health.append(record)
+        return health
 
     def provider_summary(self) -> dict[str, Any]:
         with self.read() as connection:
@@ -513,6 +587,30 @@ class WinstonRepository:
             event["details"] = json.loads(event.pop("details_json") or "{}")
             events.append(event)
         return events
+
+    def pending_drafts(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Drafts still awaiting human action, newest last.
+
+        This is what makes the review queue survive a restart: the queue is a
+        projection of the drafts table, not a list that only exists in RAM.
+        """
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT d.id AS draft_id, d.stage, d.subject, d.body, d.created_at,
+                          c.id AS contact_id, c.name, c.email, c.business_type, c.address,
+                          c.phone, c.website, c.place_id, c.instagram, c.facebook, c.tiktok
+                   FROM drafts d
+                   JOIN contacts c ON c.id = d.contact_id
+                   WHERE d.stage IN ('draft','reviewed','approved')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM suppressions s
+                         WHERE s.normalized_email = c.normalized_email
+                     )
+                   ORDER BY d.created_at
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def draft_candidates(self, limit: int = 10) -> list[dict[str, Any]]:
         """Contacts safe to draft: emailable, unsuppressed, unsent, and not already drafted."""
