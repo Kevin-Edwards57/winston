@@ -1,44 +1,93 @@
-from flask import Flask, render_template_string, request, jsonify, Response
-import anthropic
+from flask import Flask, render_template, request, jsonify, Response
 import json
 import os
 import re
+import csv
+import io
 import smtplib
 import time
 import threading
+import tempfile
+import uuid
 import requests
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from firecrawl import FirecrawlApp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from winston.repository import WinstonRepository
+from winston.ai import AIService, ProviderError
 
 load_dotenv()
 
 app = Flask(__name__)
+repository = WinstonRepository(os.getenv("WINSTON_DATABASE", "winston.db"))
+repository.initialize()
+ai_service = AIService.from_environment(repository)
+json_write_lock = threading.RLock()
 
 # ============================================================
 # KEYS — stored in .env file, never hardcode these
 # ============================================================
-FIRECRAWL_KEY        = os.getenv("FIRECRAWL_KEY")
 ANTHROPIC_KEY        = os.getenv("ANTHROPIC_KEY")
 GMAIL_ADDRESS        = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD   = os.getenv("GMAIL_APP_PASSWORD")
 GOOGLE_PLACES_KEY    = os.getenv("GOOGLE_PLACES_KEY")
-firecrawl            = FirecrawlApp(api_key=FIRECRAWL_KEY)
-claude_client        = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+# ============================================================
+# SEND SAFETY CONTROLS
+# ============================================================
+# Dry-run defaults to ON. Real mail requires an explicit opt-out, so a fresh
+# checkout, a test run, or a forgotten .env can never deliver to real people.
+WINSTON_DRY_RUN      = os.getenv("WINSTON_DRY_RUN", "true").strip().casefold() != "false"
+SEND_MIN_INTERVAL_S  = float(os.getenv("WINSTON_SEND_MIN_INTERVAL", "30"))
+SEND_MAX_PER_DAY     = int(os.getenv("WINSTON_SEND_MAX_PER_DAY", "50"))
+
+_send_gate      = threading.Lock()
+_last_send_at   = 0.0
+_send_day       = ""
+_send_day_count = 0
+
+
+class SendBlocked(RuntimeError):
+    """Raised when a send is refused by a safety control."""
+
+
+def _enforce_send_limits() -> None:
+    """Serialize sends, space them out, and cap daily volume. Raises SendBlocked."""
+    global _last_send_at, _send_day, _send_day_count
+    with _send_gate:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != _send_day:
+            _send_day, _send_day_count = today, 0
+        if _send_day_count >= SEND_MAX_PER_DAY:
+            raise SendBlocked(f"Daily send cap reached ({SEND_MAX_PER_DAY})")
+        wait = SEND_MIN_INTERVAL_S - (time.monotonic() - _last_send_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_send_at = time.monotonic()
+        _send_day_count += 1
+
+# ============================================================
+# YOUR SOCIAL HANDLES — used in DM messages
+# ============================================================
+YARDLINK_IG      = "@yardlinkstudio"
+YARDLINK_FB      = "YardLink Studio"
+YARDLINK_SITE    = "yardlinkstudio.com"
 
 # ============================================================
 # PERSISTENT STORAGE FILES
 # ============================================================
-EMAILED_FILE = "emailed.json"
-LEADS_FILE = "leads.json"
-FOLLOWUP_FILE = "followups.json"
-STATS_FILE = "stats.json"
+EMAILED_FILE   = "emailed.json"
+LEADS_FILE     = "leads.json"
+FOLLOWUP_FILE  = "followups.json"
+STATS_FILE     = "stats.json"
+SOCIAL_FILE    = "social_leads.json"   # NEW — businesses with IG/FB but no email
+CONTACTS_FILE  = "contacts.json"       # NEW — master contact DB (all leads ever found)
 
 # ============================================================
 # GOOGLE PLACES SEARCH QUERIES
-# Format: (keyword, location) — covers all 5 boroughs + LI
 # ============================================================
 PLACE_SEARCHES = [
     # ── JAMAICAN / CARIBBEAN ──
@@ -142,7 +191,7 @@ PLACE_SEARCHES = [
     ("tutoring", "Long Island, New York"),
 ]
 
-# Rotating subject lines — A/B test these
+# Rotating subject lines
 EMAIL_SUBJECTS = [
     "Your website could be working harder for you",
     "Quick idea for {name}",
@@ -154,11 +203,13 @@ EMAIL_SUBJECTS = [
 
 # In-memory state
 state = {
-    "businesses": [],
-    "emails_sent": 0,
-    "status": "idle",
-    "log": [],
-    "pending": [],
+    "businesses":    [],
+    "emails_sent":   0,
+    "status":        "idle",
+    "log":           [],
+    "pending":       [],
+    "social_pending": [],  # NEW — leads with social but no email
+    "existing_draft_progress": {"requested": 0, "completed": 0, "failed": 0},
 }
 
 # ============================================================
@@ -174,32 +225,32 @@ def load_json(filepath, default):
     return default
 
 def save_json(filepath, data):
-    with open(filepath, "w") as f:
-        json.dump(data, f, indent=2)
+    """Legacy compatibility writer using atomic replacement until JSON is retired."""
+    target = os.path.abspath(filepath)
+    directory = os.path.dirname(target) or "."
+    with json_write_lock:
+        fd, temporary = tempfile.mkstemp(prefix=".winston-", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(data, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
-def load_emailed():
-    return load_json(EMAILED_FILE, [])
-
-def save_emailed(emailed):
-    save_json(EMAILED_FILE, emailed)
-
-def load_saved_leads():
-    return load_json(LEADS_FILE, [])
-
-def save_leads(leads):
-    save_json(LEADS_FILE, leads)
-
-def load_followups():
-    return load_json(FOLLOWUP_FILE, [])
-
-def save_followups(followups):
-    save_json(FOLLOWUP_FILE, followups)
-
-def load_stats():
-    return load_json(STATS_FILE, {"emails_sent": 0, "leads_found": 0, "followups_sent": 0})
-
-def save_stats(stats):
-    save_json(STATS_FILE, stats)
+def load_emailed():      return load_json(EMAILED_FILE, [])
+def save_emailed(d):     save_json(EMAILED_FILE, d)
+def load_saved_leads():  return load_json(LEADS_FILE, [])
+def save_leads(d):       save_json(LEADS_FILE, d)
+def load_followups():    return load_json(FOLLOWUP_FILE, [])
+def load_stats():        return load_json(STATS_FILE, {"emails_sent": 0, "leads_found": 0, "followups_sent": 0, "social_leads": 0})
+def save_stats(d):       save_json(STATS_FILE, d)
+def load_social_leads(): return load_json(SOCIAL_FILE, [])
+def save_social_leads(d):save_json(SOCIAL_FILE, d)
+def load_contacts():     return load_json(CONTACTS_FILE, [])
+def save_contacts(d):    save_json(CONTACTS_FILE, d)
 
 # ============================================================
 # LOGGING
@@ -210,130 +261,369 @@ def log(msg):
     state["log"].append(entry)
     if len(state["log"]) > 200:
         state["log"] = state["log"][-200:]
+    # Structured events complement the short-lived display log. Avoid storing secrets.
+    try:
+        repository.add_event("activity.log", details={"message": str(msg)[:500]})
+    except Exception:
+        pass
 
 # ============================================================
-# SCRAPING
-# ============================================================
-# ============================================================
-# EMAIL BLOCKLIST — skip these non-business emails
+# EMAIL BLOCKLIST & QUALITY SCORING
 # ============================================================
 EMAIL_BLOCKLIST = [
     'noreply', 'no-reply', 'yelp', 'google', 'example', 'sentry',
     'facebook', 'privacy', 'support@sentry', 'info@sentry', 'wix',
     'squarespace', 'shopify', 'godaddy', 'wordpress', 'mailchimp',
     'donotreply', 'test@', 'admin@', 'webmaster@', 'postmaster@',
-    'schema', 'amazonaws', 'cloudflare', 'netlify', '.png', '.jpg'
+    'schema', 'amazonaws', 'cloudflare', 'netlify', '.png', '.jpg',
+    'reviews.import', 'domain.com', 'mysite.com', 'mailservice.com',
+    'info@info.com', 'hello@info.com', 'webador', 'booking.com',
+    'tripadvisor', 'opentable', 'grubhub', 'doordash', 'ubereats',
 ]
 
-def is_valid_email(email):
-    """Check if email is a real business contact email."""
+# ── NEW: Prefer domain emails over free emails ──
+FREE_EMAIL_DOMAINS = {'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+                      'aol.com', 'icloud.com', 'ymail.com', 'optonline.net'}
+
+def email_quality_score(email: str) -> int:
+    """
+    Score an email 0-10. Higher = better.
+    Domain email (info@theirbusiness.com) scores higher than gmail.
+    Prefers contact/info/hello prefixes over random strings.
+    """
+    if not email or '@' not in email:
+        return 0
+    local, domain = email.lower().split('@', 1)
+    if domain in FREE_EMAIL_DOMAINS:
+        base = 3  # free email — usable but not ideal
+    else:
+        base = 8  # domain email — this is a real business contact
+    # Boost for professional prefixes
+    good_prefixes = ('info', 'contact', 'hello', 'hi', 'team', 'office',
+                     'mail', 'booking', 'reservations', 'admin', 'support')
+    if any(local.startswith(p) for p in good_prefixes):
+        base += 1
+    # Penalize weirdly long local parts
+    if len(local) > 30:
+        base -= 2
+    return max(0, min(10, base))
+
+def is_valid_email(email: str) -> bool:
     email_lower = email.lower()
     if any(x in email_lower for x in EMAIL_BLOCKLIST):
         return False
     if len(email) > 80:
         return False
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return False
     return True
 
-def extract_emails_from_html(html):
-    """Pull emails from raw HTML using regex."""
+def extract_emails_from_html(html: str) -> list[str]:
     emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html)
-    return [e for e in emails if is_valid_email(e)]
-
-def scrape_with_bs4(url):
-    """
-    Primary scraper — free, local, no credits needed.
-    Uses requests + BeautifulSoup to fetch and parse HTML.
-    Works great for small business sites on Wix, Squarespace, WordPress.
-    """
-    try:
-        from bs4 import BeautifulSoup
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code != 200:
-            return ""
-        soup = BeautifulSoup(res.text, "lxml")
-
-        # Check mailto links first — most reliable source
-        for tag in soup.find_all("a", href=True):
-            href = tag["href"]
-            if href.startswith("mailto:"):
-                email = href.replace("mailto:", "").split("?")[0].strip()
-                if email and is_valid_email(email):
-                    return email
-
-        # Fall back to regex scan of full page text
-        emails = extract_emails_from_html(res.text)
-        if emails:
-            return emails[0]
-
-        return ""
-    except Exception as e:
-        return ""
-
-def scrape_with_firecrawl(url):
-    """
-    Fallback scraper — uses Firecrawl for JS-heavy or bot-protected sites.
-    Only called when BeautifulSoup returns nothing.
-    """
-    try:
-        result = firecrawl.scrape(url)
-        content = result.markdown if hasattr(result, "markdown") else str(result)
-        emails = extract_emails_from_html(content)
-        return emails[0] if emails else ""
-    except Exception as e:
-        log(f"Firecrawl fallback error: {e}")
-        return ""
-
-def scrape(url):
-    """Legacy scrape function — kept for compatibility."""
-    return scrape_with_bs4(url) or scrape_with_firecrawl(url)
-
-def find_email(website_url):
-    """
-    Hybrid email finder:
-    1. Try BeautifulSoup on homepage + contact pages (free, instant)
-    2. Fall back to Firecrawl only if BS4 finds nothing
-    """
-    pages_to_check = [
-        website_url,
-        website_url.rstrip("/") + "/contact",
-        website_url.rstrip("/") + "/contact-us",
-        website_url.rstrip("/") + "/about",
-        website_url.rstrip("/") + "/about-us",
-    ]
-
-    # ── PASS 1: BeautifulSoup (free) ──
-    for url in pages_to_check:
-        try:
-            email = scrape_with_bs4(url)
-            if email:
-                return email
-            time.sleep(0.5)
-        except:
-            continue
-
-    # ── PASS 2: Firecrawl fallback (credits) ──
-    for url in pages_to_check[:2]:  # only try homepage + /contact to save credits
-        try:
-            email = scrape_with_firecrawl(url)
-            if email:
-                return email
-            time.sleep(1)
-        except:
-            continue
-
-    return None
+    valid  = [e for e in emails if is_valid_email(e)]
+    # Sort by quality — domain emails float to top
+    return sorted(set(valid), key=email_quality_score, reverse=True)
 
 # ============================================================
-# EMAIL WRITING — smarter prompts, rotating subjects
+# SOCIAL MEDIA DETECTION — NEW
+# ============================================================
+SOCIAL_PATTERNS = {
+    "instagram": [
+        r'instagram\.com/([A-Za-z0-9_.]+)',
+    ],
+    "facebook": [
+        r'facebook\.com/([A-Za-z0-9_./-]+)',
+        r'fb\.com/([A-Za-z0-9_./-]+)',
+        r'fb\.me/([A-Za-z0-9_./-]+)',
+    ],
+    "tiktok": [
+        r'tiktok\.com/@([A-Za-z0-9_.]+)',
+    ],
+}
+
+def extract_social_handles(html: str, website_url: str = "") -> dict:
+    """
+    Extracts Instagram, Facebook, TikTok handles from a page's HTML.
+    Returns dict like: {"instagram": "handle", "facebook": "page/slug", "tiktok": "handle"}
+    """
+    found = {}
+    for platform, patterns in SOCIAL_PATTERNS.items():
+        for pat in patterns:
+            matches = re.findall(pat, html, re.IGNORECASE)
+            if matches:
+                # Clean up — remove trailing slashes, filter junk
+                clean = [m.strip('/').split('?')[0] for m in matches]
+                clean = [m for m in clean if m and len(m) > 2 and m.lower() not in
+                         ('sharer', 'share', 'dialog', 'plugins', 'tr', 'login',
+                          'home', 'pages', 'groups', 'events', 'marketplace',
+                          'formatjs', 'wix', 'wixstudio', 'intent', 'hashtag',
+                          'privacy', 'terms', 'help', 'developer', 'developers')]
+                if clean:
+                    found[platform] = clean[0]
+                    break
+    return found
+
+def scrape_social_from_website(website_url: str) -> dict:
+    """Try to pull social handles from homepage and /contact."""
+    pages = [website_url, website_url.rstrip("/") + "/contact"]
+    all_social = {}
+    for url in pages:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}
+            res = requests.get(url, headers=headers, timeout=6)
+            if res.status_code == 200:
+                social = extract_social_handles(res.text, url)
+                all_social.update(social)
+        except:
+            continue
+        if all_social:
+            break
+    return all_social
+
+def find_instagram_from_google(business_name: str, location: str) -> str:
+    """
+    Search Google for a business's Instagram page using their Places data.
+    Falls back gracefully — returns handle or empty string.
+    """
+    # Use Google Custom Search or just scrape search snippet
+    try:
+        query = f"{business_name} {location} instagram"
+        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+        res = requests.get(
+            "https://www.google.com/search",
+            params={"q": query},
+            headers=headers,
+            timeout=6
+        )
+        matches = re.findall(r'instagram\.com/([A-Za-z0-9_.]+)', res.text, re.IGNORECASE)
+        matches = [m for m in matches if m.lower() not in
+                   ('p', 'reel', 'stories', 'explore', 'accounts', 'tv')]
+        return matches[0] if matches else ""
+    except:
+        return ""
+
+# ============================================================
+# PHONE NUMBER EXTRACTION — NEW
+# ============================================================
+def extract_phone_from_html(html: str) -> str:
+    """Pull a US phone number from page HTML."""
+    patterns = [
+        r'\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}',
+        r'\+1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}',
+    ]
+    for pat in patterns:
+        matches = re.findall(pat, html)
+        if matches:
+            # Prefer numbers that look like formatted US numbers
+            cleaned = [re.sub(r'[^\d]', '', m) for m in matches]
+            valid   = [c for c in cleaned if len(c) in (10, 11)]
+            if valid:
+                num = valid[0][-10:]  # strip leading 1 if 11 digits
+                return f"({num[:3]}) {num[3:6]}-{num[6:]}"
+    return ""
+
+# ============================================================
+# SCRAPING
+# ============================================================
+LOCAL_SCRAPER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Winston/1.0",
+    "Accept": "text/html,application/xhtml+xml",
+}
+MAX_LOCAL_PAGE_BYTES = 2_000_000
+
+class LocalLinkParser(HTMLParser):
+    """Minimal dependency-free link extractor for public business pages."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+        self._href = None
+        self._text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() == "a":
+            self._href = dict(attrs).get("href", "")
+            self._text = []
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() == "a" and self._href is not None:
+            self.links.append((self._href, " ".join(self._text).strip()))
+            self._href = None
+            self._text = []
+
+def fetch_local_html(url: str) -> str:
+    """Fetch one public HTML page locally without any paid scraping service."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    try:
+        response = requests.get(url, headers=LOCAL_SCRAPER_HEADERS, timeout=10)
+        content_type = response.headers.get("Content-Type", "").lower()
+        if response.status_code != 200 or "html" not in content_type:
+            return ""
+        if len(response.content) > MAX_LOCAL_PAGE_BYTES:
+            return ""
+        return response.text
+    except requests.RequestException:
+        return ""
+
+def discover_contact_pages(home_url: str, html: str, limit: int = 5) -> list[str]:
+    """Find likely contact/about pages while staying on the website's own domain."""
+    home = urlparse(home_url)
+    discovered = []
+    parser = LocalLinkParser()
+    parser.feed(html)
+    keywords = ("contact", "about", "team", "location", "visit", "reservation")
+    for href, label in parser.links:
+        href = href.strip()
+        label = label.casefold()
+        absolute = urljoin(home_url, href)
+        parsed = urlparse(absolute)
+        haystack = f"{parsed.path} {label}".casefold()
+        if parsed.scheme in ("http", "https") and parsed.netloc == home.netloc and any(word in haystack for word in keywords):
+            clean = parsed._replace(fragment="").geturl()
+            if clean not in discovered and clean != home_url:
+                discovered.append(clean)
+        if len(discovered) >= limit:
+            break
+    return discovered
+
+def scrape_local_page(url: str, html: str | None = None) -> tuple[str, str, dict]:
+    """
+    Returns (best_email, phone, social_handles) from a page.
+    """
+    try:
+        html = html if html is not None else fetch_local_html(url)
+        if not html:
+            return "", "", {}
+        social = extract_social_handles(html, url)
+        phone  = extract_phone_from_html(html)
+
+        # Check mailto links first
+        mailto_emails = []
+        parser = LocalLinkParser()
+        parser.feed(html)
+        for href, _ in parser.links:
+            if href.casefold().startswith("mailto:"):
+                email = href[7:].split("?")[0].strip()
+                if email and is_valid_email(email):
+                    mailto_emails.append(email)
+
+        # Score and pick best
+        all_emails = mailto_emails + extract_emails_from_html(html)
+        all_emails = list(dict.fromkeys(all_emails))  # dedupe, preserve order
+        best_email = sorted(all_emails, key=email_quality_score, reverse=True)[0] if all_emails else ""
+
+        return best_email, phone, social
+
+    except Exception:
+        return "", "", {}
+
+def find_contact_info(website_url: str) -> tuple[str, str, dict]:
+    """
+    Full contact info finder.
+    Returns (best_email, phone, social_handles)
+    Tries multiple pages, scores emails, picks domain email over gmail.
+    """
+    homepage_html = fetch_local_html(website_url)
+    pages = [website_url]
+    if homepage_html:
+        pages.extend(discover_contact_pages(website_url, homepage_html))
+    for fallback_path in ("/contact", "/contact-us", "/about", "/about-us"):
+        fallback = website_url.rstrip("/") + fallback_path
+        if fallback not in pages and len(pages) < 6:
+            pages.append(fallback)
+
+    all_emails = []
+    best_phone = ""
+    all_social = {}
+
+    # All scraping is local and free: requests + the standard-library parser only.
+    for index, url in enumerate(pages):
+        try:
+            email, phone, social = scrape_local_page(url, homepage_html if index == 0 else None)
+            if email:
+                all_emails.append(email)
+            if phone and not best_phone:
+                best_phone = phone
+            all_social.update(social)
+            time.sleep(0.2)
+        except:
+            continue
+
+    # Pick the best email
+    best_email = sorted(all_emails, key=email_quality_score, reverse=True)[0] if all_emails else ""
+
+    return best_email, best_phone, all_social
+
+# ============================================================
+# DM MESSAGE WRITER — NEW
+# ============================================================
+def write_instagram_dm(business: dict) -> str:
+    """Generate a short, punchy Instagram DM for a business."""
+    try:
+        name     = business.get('name', 'there')
+        biz_type = business.get('type', 'business')
+        location = business.get('address', 'NYC')
+        ig       = business.get('instagram', '')
+        handle_line = f"Saw your page ({ig}) — " if ig else ""
+
+        prompt = f"""Write a short Instagram DM from YardLink Studio to {name}, a {biz_type} in {location}.
+
+{handle_line}YardLink Studio ({YARDLINK_IG}) is a NYC digital agency that builds modern websites and AI tools for small businesses.
+
+Rules:
+- Under 60 words
+- Casual and human — this is a DM, not a formal email
+- No emojis, no bullet points
+- One genuine compliment or observation about their business
+- One specific thing we could help with
+- End with a soft CTA: ask if they'd want to know more
+- Sign off: — Kevin @ {YARDLINK_IG}
+- Plain text only"""
+
+        return ai_service.generate(prompt, max_tokens=200, purpose="instagram_dm").text
+    except Exception as e:
+        log(f"DM write error: {e}")
+        return ""
+
+def write_facebook_dm(business: dict) -> str:
+    """Generate a short Facebook page DM."""
+    try:
+        name     = business.get('name', 'there')
+        biz_type = business.get('type', 'business')
+        location = business.get('address', 'NYC')
+
+        prompt = f"""Write a short Facebook Messenger message from YardLink Studio to {name}, a {biz_type} in {location}.
+
+YardLink Studio is a NYC digital agency (yardlinkstudio.com) that builds websites and AI tools for small businesses.
+
+Rules:
+- Under 70 words
+- Friendly and direct — this is a page message, not an email
+- Reference that we work specifically with {biz_type}s in NYC/Long Island
+- One specific value prop (e.g. AI chatbot that handles DMs/calls 24/7)
+- End with: "Would love to connect if you're open to it."
+- Sign: Kevin @ YardLink Studio
+- Plain text only, no emojis"""
+
+        return ai_service.generate(prompt, max_tokens=200, purpose="facebook_dm").text
+    except Exception as e:
+        log(f"FB DM write error: {e}")
+        return ""
+
+# ============================================================
+# EMAIL WRITING
 # ============================================================
 def get_subject(business_name, index=0):
     template = EMAIL_SUBJECTS[index % len(EMAIL_SUBJECTS)]
     return template.replace("{name}", business_name)
 
-def write_email(business):
+def write_email(business: dict) -> str:
     try:
         biz_name = business.get('name', 'there')
         biz_type = business.get('type', 'business')
@@ -356,52 +646,52 @@ Rules:
 - Sign off: — The YardLink Studio Team | yardlinkstudio.com
 - Plain text only, no markdown, no bullet points"""
 
-        msg = claude_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return msg.content[0].text.strip()
+        return ai_service.generate(prompt, max_tokens=400, purpose="email_draft").text
     except Exception as e:
         log(f"Email write error: {e}")
-        return None
-
-def write_followup_email(business, original_body):
-    try:
-        prompt = f"""Write a short follow-up cold email to {business.get('name')}, a {business.get('type')} in {business.get('address','NYC')}.
-
-This is a follow-up to a previous email from YardLink Studio (yardlinkstudio.com) about building them a website or AI chatbot.
-The original email said: {original_body[:300]}
-
-Rules:
-- Under 80 words
-- Casual, not pushy — just a gentle bump
-- Acknowledge they're busy
-- One new hook or stat (e.g. "Most small businesses miss 40% of calls after hours")
-- End with: "Still open to a quick chat if the timing works."
-- Sign: — YardLink Studio | yardlinkstudio.com
-- Plain text only"""
-
-        msg = claude_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=250,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return msg.content[0].text.strip()
-    except Exception as e:
-        log(f"Followup write error: {e}")
-        return None
+        return ""
 
 # ============================================================
-# EMAIL SENDING — with rate limiting
+# EMAIL SENDING
 # ============================================================
-def send_email_fn(to_email, business_name, body, subject=None):
+def send_email_fn(to_email: str, business_name: str, body: str, subject: str = None) -> bool:
+    """The single production delivery primitive.
+
+    Reachable only from confirm_send() after the full state machine has run.
+    Three independent guards sit in front of SMTP: dry-run, a suppression
+    backstop, and rate limiting. Any one of them refusing means no mail.
+    """
+    if not subject:
+        subject = f"Quick idea for {business_name}"
+
+    # Guard 1 — suppression backstop. claim_send() already checks this inside the
+    # claiming transaction; repeating it here means no future caller can bypass it.
+    if repository.is_suppressed(to_email):
+        log(f"BLOCKED: {to_email} is suppressed")
+        repository.add_event("send.blocked", entity_type="contact",
+                             details={"reason": "suppressed", "email": to_email})
+        return False
+
+    # Guard 2 — dry-run. Default ON; real delivery is an explicit opt-out.
+    if WINSTON_DRY_RUN:
+        log(f"DRY RUN: would send to {to_email} — subject {subject!r}")
+        repository.add_event("send.dry_run", entity_type="contact",
+                             details={"email": to_email, "subject": subject[:120]})
+        return True
+
+    # Guard 3 — rate limiting and daily cap.
     try:
-        if not subject:
-            subject = f"Quick idea for {business_name}"
+        _enforce_send_limits()
+    except SendBlocked as exc:
+        log(f"BLOCKED: {exc}")
+        repository.add_event("send.blocked", entity_type="contact",
+                             details={"reason": str(exc), "email": to_email})
+        return False
+
+    try:
         msg = MIMEMultipart()
-        msg["From"] = GMAIL_ADDRESS
-        msg["To"] = to_email
+        msg["From"]    = GMAIL_ADDRESS
+        msg["To"]      = to_email
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
@@ -413,71 +703,67 @@ def send_email_fn(to_email, business_name, body, subject=None):
         return False
 
 # ============================================================
-# FOLLOW-UP SCHEDULER
+# LEGACY FOLLOW-UP SENDER — REMOVED 2026-08-23
 # ============================================================
-def check_and_send_followups():
-    followups = load_followups()
-    now = datetime.now()
-    updated = []
-    sent_count = 0
+# check_and_send_followups() and followup_scheduler() were deleted, not disabled.
+# They sent mail directly from followups.json, bypassing suppression, idempotency,
+# atomic claiming, audit logging, and human confirmation. 131 follow-ups went out
+# through that path before it was closed.
+#
+# There is now exactly ONE production send path:
+#   draft -> reviewed -> approved -> queued -> confirmed -> claim_send() -> send_email_fn()
+# Historical follow-up records are preserved as read-only data (see /sent).
+# Re-introducing a second send path is a regression; tests/test_no_legacy_send.py enforces this.
 
-    for entry in followups:
-        sent_date = datetime.fromisoformat(entry["sent_date"])
-        days_since = (now - sent_date).days
+# ============================================================
+# MASTER CONTACT DB — NEW
+# save every lead we ever find, regardless of whether emailed
+# ============================================================
+def upsert_contact(business: dict, email: str, phone: str, social: dict):
+    """Add or update a contact in the master contacts DB."""
+    contacts = load_contacts()
+    place_id = business.get("place_id", "")
 
-        if entry.get("followup_sent"):
-            updated.append(entry)
-            continue
+    contact = {
+        "place_id":   place_id,
+        "name":       business.get("name", ""),
+        "type":       business.get("type", ""),
+        "address":    business.get("address", ""),
+        "phone":      phone or business.get("phone", ""),
+        "website":    business.get("website", ""),
+        "email":      email,
+        "email_score": email_quality_score(email) if email else 0,
+        "instagram":  social.get("instagram", ""),
+        "facebook":   social.get("facebook", ""),
+        "tiktok":     social.get("tiktok", ""),
+        "found_at":   datetime.now().isoformat(),
+    }
 
-        if days_since >= 3:
-            followup_body = write_followup_email(entry, entry.get("original_body", ""))
-            if followup_body:
-                subject = f"Re: {entry.get('subject', 'Quick idea for ' + entry['name'])}"
-                success = send_email_fn(entry["email"], entry["name"], followup_body, subject)
-                if success:
-                    entry["followup_sent"] = True
-                    entry["followup_date"] = now.isoformat()
-                    sent_count += 1
-                    log(f"Follow-up sent to {entry['name']} 📬")
-                    stats = load_stats()
-                    stats["followups_sent"] = stats.get("followups_sent", 0) + 1
-                    save_stats(stats)
-                    time.sleep(10)
+    if place_id:
+        for existing in contacts:
+            if existing.get("place_id") == place_id:
+                # Keep previously discovered values when a later scan has blanks.
+                for key, value in contact.items():
+                    if value or key == "email_score":
+                        existing[key] = value
+                existing["updated_at"] = datetime.now().isoformat()
+                save_contacts(contacts)
+                return
 
-        updated.append(entry)
-
-    save_followups(updated)
-    return sent_count
-
-def followup_scheduler():
-    while True:
-        time.sleep(3600)
-        try:
-            n = check_and_send_followups()
-            if n > 0:
-                log(f"Follow-up scheduler sent {n} emails 📬")
-        except Exception as e:
-            log(f"Follow-up scheduler error: {e}")
+    contacts.append(contact)
+    save_contacts(contacts)
 
 # ============================================================
 # GOOGLE PLACES API — LEAD DISCOVERY
 # ============================================================
-def google_places_search(keyword, location, max_results=20):
-    """
-    Use Google Places Text Search to find real businesses.
-    Returns list of dicts: {name, address, website, phone, types, place_id}
-    """
+def google_places_search(keyword: str, location: str, max_results: int = 20) -> list:
     businesses = []
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    query = f"{keyword} in {location}"
-    params = {
-        "query": query,
-        "key": GOOGLE_PLACES_KEY,
-        "type": "establishment"
-    }
+    url    = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    query  = f"{keyword} in {location}"
+    params = {"query": query, "key": GOOGLE_PLACES_KEY, "type": "establishment"}
 
     try:
-        res = requests.get(url, params=params, timeout=10)
+        res  = requests.get(url, params=params, timeout=10)
         data = res.json()
 
         if data.get("status") not in ("OK", "ZERO_RESULTS"):
@@ -491,17 +777,15 @@ def google_places_search(keyword, location, max_results=20):
             name     = place.get("name", "")
             address  = place.get("formatted_address", location)
             types    = ", ".join(place.get("types", [])[:3]).replace("_", " ")
-
-            # Get website + phone from Place Details
             website, phone = get_place_details(place_id)
 
             businesses.append({
-                "name":    name,
-                "address": address,
-                "type":    keyword,
-                "types":   types,
-                "website": website,
-                "phone":   phone,
+                "name":     name,
+                "address":  address,
+                "type":     keyword,
+                "types":    types,
+                "website":  website,
+                "phone":    phone,
                 "place_id": place_id,
             })
 
@@ -511,34 +795,35 @@ def google_places_search(keyword, location, max_results=20):
         log(f"Places search error: {e}")
         return []
 
-
-def get_place_details(place_id):
+def get_place_details(place_id: str) -> tuple[str, str]:
     """Fetch website and phone from a Place ID."""
-    url = "https://maps.googleapis.com/maps/api/place/details/json"
+    url    = "https://maps.googleapis.com/maps/api/place/details/json"
     params = {
         "place_id": place_id,
-        "fields": "website,formatted_phone_number",
-        "key": GOOGLE_PLACES_KEY,
+        "fields":   "website,formatted_phone_number",
+        "key":      GOOGLE_PLACES_KEY,
     }
     try:
-        res = requests.get(url, params=params, timeout=8)
+        res    = requests.get(url, params=params, timeout=8)
         result = res.json().get("result", {})
-        website = result.get("website", "")
-        phone   = result.get("formatted_phone_number", "")
-        return website, phone
+        return result.get("website", ""), result.get("formatted_phone_number", "")
     except:
         return "", ""
 
-
 # ============================================================
-# MAIN SCAN — Google Places powered
+# MAIN SCAN — upgraded with social + phone collection
 # ============================================================
 def run_scan(searches):
     state["status"] = "scanning"
-    log("Aight Kevin, new pipeline is live. Let's get it.")
-    emailed  = load_emailed()
+    log("Winston is live. Let's get it, Emperor Edwards.")
+    emailed       = load_emailed()
+    emailed_keys  = {str(value).lower() for value in emailed}
+    queued_emails = {b.get("email", "").lower() for b in state["pending"] if b.get("email")}
+    social_leads  = load_social_leads()
+    social_handles_seen = {s.get("place_id") for s in social_leads if s.get("place_id")}
     subject_index = 0
-    total_leads   = 0
+    total_email_leads  = 0
+    total_social_leads = 0
 
     for (keyword, location) in searches:
         if state["status"] == "stopped":
@@ -560,51 +845,145 @@ def run_scan(searches):
 
             name    = b.get("name", "Unknown")
             website = b.get("website", "")
+            phone   = b.get("phone", "")
 
-            # Skip if no website — nowhere to scrape for email
-            if not website:
-                log(f"No website: {name}, skipping")
-                continue
+            # ── Try to get email + phone + social from website ──
+            if website:
+                log(f"Scraping {name}...")
+                email, scraped_phone, social = find_contact_info(website)
+                if scraped_phone and not phone:
+                    phone = scraped_phone
+            else:
+                email  = ""
+                social = {}
 
-            # Scrape their website for a real contact email
-            log(f"Checking website for {name}...")
-            email = find_email(website)
+            # ── If no website, try to find IG via Google search ──
+            if not website and not social.get("instagram"):
+                ig = find_instagram_from_google(name, b.get("address", "NYC"))
+                if ig:
+                    social["instagram"] = ig
 
-            if not email:
-                log(f"No email found: {name}")
-                continue
+            # ── Save to master contact DB regardless ──
+            upsert_contact(b, email, phone, social)
 
-            if email in emailed:
-                log(f"Already contacted: {name}")
-                continue
+            # ── Route: email lead vs social-only lead ──
+            email_key = email.lower()
+            if email and email_key not in emailed_keys and email_key not in queued_emails and email_quality_score(email) >= 3:
+                log(f"📧 Email lead: {name} — {email} (score: {email_quality_score(email)}/10)")
+                subject = get_subject(name, subject_index)
+                subject_index += 1
+                body = write_email(b)
+                if body:
+                    b["email"]   = email
+                    b["phone"]   = phone
+                    b["draft"]   = body
+                    b["subject"] = subject
+                    b["social"]  = social
+                    state["pending"].append(b)
+                    queued_emails.add(email_key)
+                    total_email_leads += 1
+                    stats = load_stats()
+                    stats["leads_found"] = stats.get("leads_found", 0) + 1
+                    save_stats(stats)
+                    log(f"Draft ready: {name} 🔥")
 
-            log(f"Lead locked: {name} — {email} 💰")
-            subject = get_subject(name, subject_index)
-            subject_index += 1
+            elif not email and social and b.get("place_id") not in social_handles_seen:
+                # No email but has social — queue as social lead
+                log(f"📱 Social lead: {name} — IG: {social.get('instagram','')} FB: {social.get('facebook','')}")
+                b["phone"]  = phone
+                b["social"] = social
+                dm_ig = write_instagram_dm(b) if social.get("instagram") else ""
+                dm_fb = write_facebook_dm(b) if social.get("facebook") else ""
+                if dm_ig or dm_fb:
+                    b["dm_ig"] = dm_ig
+                    b["dm_fb"] = dm_fb
+                    social_leads.append({**b, "added_at": datetime.now().isoformat()})
+                    social_handles_seen.add(b.get("place_id"))
+                    save_social_leads(social_leads)
+                    state["social_pending"].append(b)
+                    total_social_leads += 1
+                    stats = load_stats()
+                    stats["social_leads"] = stats.get("social_leads", 0) + 1
+                    save_stats(stats)
 
-            body = write_email(b)
-            if body:
-                b["email"]   = email
-                b["draft"]   = body
-                b["subject"] = subject
-                state["pending"].append(b)
-                total_leads += 1
+            elif not email and not social:
+                if phone:
+                    log(f"📞 Phone only: {name} — {phone}")
+                else:
+                    log(f"No contact found: {name}")
 
-                stats = load_stats()
-                stats["leads_found"] = stats.get("leads_found", 0) + 1
-                save_stats(stats)
-
-                log(f"Draft ready: {name} 🔥")
-
-            time.sleep(1.5)  # be respectful to Firecrawl rate limits
+            time.sleep(1.5)
 
         time.sleep(1)
 
     state["status"] = "idle"
-    log(f"Done scanning. {total_leads} leads ready for you Kevin.")
+    log(f"Done. {total_email_leads} email leads, {total_social_leads} social leads. Let's go Kevin.")
+
+def run_existing_contact_drafts(limit: int):
+    """Create a bounded, zero-discovery-cost review batch from migrated contacts."""
+    state["status"] = "drafting_existing"
+    progress = {"requested": limit, "completed": 0, "failed": 0}
+    state["existing_draft_progress"] = progress
+    candidates = repository.draft_candidates(limit)
+    progress["requested"] = len(candidates)
+    log(f"Zero-cost batch started: {len(candidates)} existing contacts")
+    for contact in candidates:
+        if state["status"] == "stopped":
+            break
+        email = contact.get("email", "")
+        if not is_valid_email(email):
+            progress["failed"] += 1
+            repository.suppress(email, "invalid-or-blocklisted", contact["id"])
+            repository.add_event("draft.skipped_invalid_email", entity_type="contact",
+                                 entity_id=contact["id"])
+            continue
+        business = {
+            "contact_id": contact["id"],
+            "place_id": contact.get("place_id", ""),
+            "name": contact.get("name", ""),
+            "email": email,
+            "email_score": email_quality_score(email),
+            "phone": contact.get("phone", ""),
+            "website": contact.get("website", ""),
+            "address": contact.get("address", ""),
+            "type": contact.get("business_type", "") or "business",
+            "social": {
+                "instagram": contact.get("instagram", ""),
+                "facebook": contact.get("facebook", ""),
+                "tiktok": contact.get("tiktok", ""),
+            },
+        }
+        subject = get_subject(business["name"], progress["completed"])
+        body = write_email(business)
+        if not body:
+            progress["failed"] += 1
+            log(f"Local draft failed: {business['name']}")
+            continue
+        draft_id = repository.create_draft(contact["id"], subject, body)
+        business.update({"subject": subject, "draft": body, "draft_id": draft_id,
+                         "workflow_stage": "draft"})
+        state["pending"].append(business)
+        progress["completed"] += 1
+        log(f"Local draft ready: {business['name']} ({progress['completed']}/{len(candidates)})")
+    state["status"] = "idle"
+    log(f"Zero-cost batch complete: {progress['completed']} drafts, {progress['failed']} skipped/failed")
 
 # ============================================================
-# HTML FRONTEND
+# CSV EXPORT — NEW
+# ============================================================
+def generate_csv() -> str:
+    """Export master contact DB as CSV string."""
+    contacts = load_contacts()
+    output   = io.StringIO()
+    fieldnames = ["name", "type", "address", "phone", "email", "email_score",
+                  "website", "instagram", "facebook", "tiktok", "found_at"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
+    writer.writeheader()
+    writer.writerows(contacts)
+    return output.getvalue()
+
+# ============================================================
+# HTML FRONTEND — upgraded with Social tab + CSV export
 # ============================================================
 HTML = '''<!DOCTYPE html>
 <html lang="en">
@@ -628,6 +1007,9 @@ HTML = '''<!DOCTYPE html>
   --red: #FF4D4D;
   --red-dim: rgba(255,77,77,0.08);
   --blue: #4D9FFF;
+  --blue-dim: rgba(77,159,255,0.08);
+  --purple: #B06AFF;
+  --purple-dim: rgba(176,106,255,0.1);
   --white: #EDE8DF;
   --gray: #444;
   --dim: rgba(237,232,223,0.35);
@@ -647,20 +1029,9 @@ body {
 
 body::before {
   content:'';
-  position:fixed;
-  inset:0;
+  position:fixed; inset:0;
   background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
-  pointer-events:none;
-  z-index:9999;
-}
-
-body::after {
-  content:'';
-  position:fixed;
-  inset:0;
-  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
-  pointer-events:none;
-  z-index:9998;
+  pointer-events:none; z-index:9999;
 }
 
 header {
@@ -674,241 +1045,155 @@ header {
   flex-shrink: 0;
   position: relative;
 }
-
 header::after {
-  content:'';
-  position:absolute;
-  bottom:0; left:0; right:0;
-  height:1px;
+  content:''; position:absolute; bottom:0; left:0; right:0; height:1px;
   background: linear-gradient(90deg, transparent, var(--green), transparent);
   opacity:0.3;
 }
 
 .header-left { display:flex; align-items:center; gap:14px; }
-
 .logo-mark {
-  width:40px; height:40px;
-  border-radius:10px;
+  width:40px; height:40px; border-radius:10px;
   background: linear-gradient(135deg, #00FF87 0%, #00C060 100%);
   display:flex; align-items:center; justify-content:center;
   font-size:1.2rem;
   box-shadow: 0 0 24px rgba(0,255,135,0.25), inset 0 1px 0 rgba(255,255,255,0.2);
-  animation: pulse-logo 4s ease-in-out infinite;
-  flex-shrink:0;
+  animation: pulse-logo 4s ease-in-out infinite; flex-shrink:0;
 }
 @keyframes pulse-logo {
   0%,100%{box-shadow:0 0 24px rgba(0,255,135,0.25),inset 0 1px 0 rgba(255,255,255,0.2);}
   50%{box-shadow:0 0 40px rgba(0,255,135,0.45),inset 0 1px 0 rgba(255,255,255,0.2);}
 }
-
-.logo-text h1 {
-  font-family:'Bebas Neue',sans-serif;
-  font-size:1.35rem;
-  letter-spacing:3px;
-  color:var(--green);
-  line-height:1;
-}
-.logo-text p {
-  font-size:0.62rem;
-  color:var(--dim);
-  letter-spacing:2px;
-  text-transform:uppercase;
-}
+.logo-text h1 { font-family:'Bebas Neue',sans-serif; font-size:1.35rem; letter-spacing:3px; color:var(--green); line-height:1; }
+.logo-text p  { font-size:0.62rem; color:var(--dim); letter-spacing:2px; text-transform:uppercase; }
 
 .header-center {
-  position:absolute;
-  left:50%; transform:translateX(-50%);
-  display:flex; align-items:center; gap:24px;
+  position:absolute; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:16px;
 }
-
 .stat-pill {
   display:flex; align-items:center; gap:8px;
-  background: var(--card);
-  border:1px solid var(--border2);
-  border-radius:100px;
-  padding:5px 14px 5px 10px;
+  background:var(--card); border:1px solid var(--border2);
+  border-radius:100px; padding:5px 14px 5px 10px;
 }
 .stat-pill-icon { font-size:0.85rem; }
 .stat-pill-info { display:flex; flex-direction:column; line-height:1; }
-.stat-pill-num {
-  font-family:'Bebas Neue',sans-serif;
-  font-size:1.1rem;
-  color:var(--gold);
-  line-height:1.1;
-}
-.stat-pill-label { font-size:0.58rem; color:var(--dim); letter-spacing:1px; text-transform:uppercase; }
+.stat-pill-num  { font-family:'Bebas Neue',sans-serif; font-size:1.1rem; color:var(--gold); line-height:1.1; }
+.stat-pill-label{ font-size:0.58rem; color:var(--dim); letter-spacing:1px; text-transform:uppercase; }
 
 .status-badge {
   display:flex; align-items:center; gap:8px;
-  background:var(--green-dim);
-  border:1px solid rgba(0,255,135,0.2);
-  padding:5px 14px;
-  border-radius:100px;
-  font-size:0.7rem;
-  font-weight:700;
-  letter-spacing:1.5px;
-  text-transform:uppercase;
-  color:var(--green);
+  background:var(--green-dim); border:1px solid rgba(0,255,135,0.2);
+  padding:5px 14px; border-radius:100px;
+  font-size:0.7rem; font-weight:700; letter-spacing:1.5px; text-transform:uppercase; color:var(--green);
 }
-.status-dot {
-  width:6px; height:6px; border-radius:50%;
-  background:var(--green);
-  animation:blink 1.4s ease-in-out infinite;
-}
+.status-dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:blink 1.4s ease-in-out infinite; }
 @keyframes blink{0%,100%{opacity:1;}50%{opacity:0.2;}}
 
-.main {
-  display:grid;
-  grid-template-columns: 300px 1fr 300px;
-  flex:1;
-  overflow:hidden;
-}
-
-.panel {
-  display:flex; flex-direction:column;
-  overflow:hidden;
-  border-right:1px solid var(--border);
-}
+.main { display:grid; grid-template-columns:300px 1fr 300px; flex:1; overflow:hidden; }
+.panel { display:flex; flex-direction:column; overflow:hidden; border-right:1px solid var(--border); }
 .panel:last-child { border-right:none; border-left:1px solid var(--border); }
 
 .panel-header {
-  padding:12px 16px;
-  border-bottom:1px solid var(--border);
+  padding:12px 16px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
-  flex-shrink:0;
-  background:var(--surface);
+  flex-shrink:0; background:var(--surface);
 }
-.panel-title {
-  font-family:'Bebas Neue',sans-serif;
-  font-size:0.85rem; letter-spacing:3px; color:var(--dim2);
-}
+.panel-title { font-family:'Bebas Neue',sans-serif; font-size:0.85rem; letter-spacing:3px; color:var(--dim2); }
 .panel-badge {
-  font-family:'Space Mono',monospace;
-  font-size:0.65rem; font-weight:700;
+  font-family:'Space Mono',monospace; font-size:0.65rem; font-weight:700;
   padding:2px 9px; border-radius:100px;
-  background:var(--green-dim);
-  border:1px solid rgba(0,255,135,0.2);
-  color:var(--green);
+  background:var(--green-dim); border:1px solid rgba(0,255,135,0.2); color:var(--green);
 }
-.panel-badge.gold {
-  background:var(--gold-dim);
-  border-color:rgba(255,209,0,0.2);
-  color:var(--gold);
-}
+.panel-badge.gold { background:var(--gold-dim); border-color:rgba(255,209,0,0.2); color:var(--gold); }
+.panel-badge.purple { background:var(--purple-dim); border-color:rgba(176,106,255,0.2); color:var(--purple); }
 
 .panel-body { flex:1; overflow-y:auto; padding:10px; }
 .panel-body::-webkit-scrollbar { width:2px; }
 .panel-body::-webkit-scrollbar-thumb { background:rgba(0,255,135,0.15); border-radius:2px; }
 
 .lead-card {
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:10px;
-  padding:12px;
-  margin-bottom:8px;
-  transition:all 0.2s;
-  position:relative;
-  overflow:hidden;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:10px; padding:12px; margin-bottom:8px;
+  transition:all 0.2s; position:relative; overflow:hidden;
 }
 .lead-card::before {
-  content:'';
-  position:absolute;
-  left:0; top:0; bottom:0; width:3px;
-  background:var(--green);
-  border-radius:3px 0 0 3px;
-  opacity:0;
-  transition:opacity 0.2s;
+  content:''; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--green); border-radius:3px 0 0 3px;
+  opacity:0; transition:opacity 0.2s;
 }
+.lead-card.social-card::before { background:var(--purple); }
 .lead-card:hover { border-color:var(--border2); }
 .lead-card:hover::before { opacity:1; }
 
-.lead-name { font-weight:700; font-size:0.84rem; margin-bottom:3px; }
-.lead-email {
-  font-family:'Space Mono',monospace;
-  font-size:0.64rem; color:var(--green); margin-bottom:3px;
-}
-.lead-meta { font-size:0.65rem; color:var(--dim); margin-bottom:8px; }
-.lead-subject {
-  font-size:0.68rem; color:var(--gold);
-  margin-bottom:6px; font-style:italic;
-}
+.lead-name   { font-weight:700; font-size:0.84rem; margin-bottom:3px; }
+.lead-email  { font-family:'Space Mono',monospace; font-size:0.64rem; color:var(--green); margin-bottom:3px; }
+.lead-phone  { font-family:'Space Mono',monospace; font-size:0.64rem; color:var(--gold); margin-bottom:3px; }
+.lead-social { font-size:0.64rem; color:var(--purple); margin-bottom:3px; }
+.lead-meta   { font-size:0.65rem; color:var(--dim); margin-bottom:8px; }
+.lead-subject{ font-size:0.68rem; color:var(--gold); margin-bottom:6px; font-style:italic; }
+.email-score { font-size:0.6rem; color:var(--dim); }
+.score-high  { color:var(--green); }
+.score-mid   { color:var(--gold); }
+.score-low   { color:var(--red); }
 
 .email-preview {
-  background:rgba(0,255,135,0.03);
-  border:1px solid rgba(0,255,135,0.08);
-  border-radius:6px;
-  padding:8px 10px;
-  font-size:0.7rem; color:var(--dim);
-  line-height:1.55;
-  margin-bottom:8px;
-  max-height:80px; overflow:hidden;
-  cursor:pointer;
-  transition:max-height 0.3s;
+  background:rgba(0,255,135,0.03); border:1px solid rgba(0,255,135,0.08);
+  border-radius:6px; padding:8px 10px;
+  font-size:0.7rem; color:var(--dim); line-height:1.55; margin-bottom:8px;
+  max-height:80px; overflow:hidden; cursor:pointer; transition:max-height 0.3s;
 }
 .email-preview.expanded { max-height:300px; overflow-y:auto; }
 .email-preview:hover { border-color:rgba(0,255,135,0.15); }
+.dm-preview {
+  background:rgba(176,106,255,0.04); border:1px solid rgba(176,106,255,0.12);
+  border-radius:6px; padding:8px 10px;
+  font-size:0.7rem; color:var(--dim); line-height:1.55; margin-bottom:4px;
+  max-height:80px; overflow:hidden; cursor:pointer; transition:max-height 0.3s;
+}
+.dm-preview.expanded { max-height:200px; overflow-y:auto; }
+.dm-label { font-size:0.6rem; color:var(--purple); margin-bottom:2px; letter-spacing:1px; text-transform:uppercase; }
 
 .lead-actions { display:flex; gap:6px; }
-
-.btn-approve, .btn-reject {
-  flex:1; padding:6px;
-  border-radius:6px; border:none;
-  font-family:'DM Sans',sans-serif;
-  font-size:0.68rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase;
-  cursor:pointer; transition:all 0.15s;
-}
 .btn-approve {
-  background:var(--green-dim);
-  border:1px solid rgba(0,255,135,0.25);
-  color:var(--green);
+  flex:1; padding:6px; border-radius:6px; border:none;
+  font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
+  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
+  background:var(--green-dim); border:1px solid rgba(0,255,135,0.25); color:var(--green);
 }
 .btn-approve:hover { background:rgba(0,255,135,0.22); transform:scale(1.02); }
 .btn-reject {
-  background:var(--red-dim);
-  border:1px solid rgba(255,77,77,0.2);
-  color:var(--red);
+  flex:1; padding:6px; border-radius:6px; border:none;
+  font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
+  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
+  background:var(--red-dim); border:1px solid rgba(255,77,77,0.2); color:var(--red);
 }
 .btn-reject:hover { background:rgba(255,77,77,0.15); }
 
 .sent-card {
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:8px;
-  padding:10px 12px;
-  margin-bottom:6px;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:8px; padding:10px 12px; margin-bottom:6px;
   display:flex; align-items:center; gap:10px;
 }
-.sent-dot {
-  width:7px; height:7px; border-radius:50%;
-  background:var(--green); flex-shrink:0;
-}
+.sent-dot { width:7px; height:7px; border-radius:50%; background:var(--green); flex-shrink:0; }
 .sent-dot.followup { background:var(--blue); }
 .sent-info { flex:1; min-width:0; }
-.sent-name { font-size:0.78rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sent-name  { font-size:0.78rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .sent-email { font-family:'Space Mono',monospace; font-size:0.6rem; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.sent-date { font-size:0.6rem; color:var(--dim); flex-shrink:0; }
+.sent-date  { font-size:0.6rem; color:var(--dim); flex-shrink:0; }
 
-.center-panel {
-  display:flex; flex-direction:column; overflow:hidden;
-}
+.center-panel { display:flex; flex-direction:column; overflow:hidden; }
 
 .controls {
-  padding:10px 16px;
-  border-bottom:1px solid var(--border);
-  display:flex; gap:8px; flex-shrink:0;
-  background:var(--surface);
+  padding:10px 16px; border-bottom:1px solid var(--border);
+  display:flex; gap:8px; flex-shrink:0; background:var(--surface); flex-wrap:wrap;
 }
 .ctrl-btn {
-  flex:1; padding:9px;
-  border-radius:7px;
-  border:1px solid var(--border2);
-  background:var(--card);
-  color:var(--white);
-  font-family:'DM Sans',sans-serif;
-  font-size:0.72rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase;
-  cursor:pointer; transition:all 0.15s;
+  flex:1; padding:9px; border-radius:7px; border:1px solid var(--border2);
+  background:var(--card); color:var(--white);
+  font-family:'DM Sans',sans-serif; font-size:0.72rem; font-weight:700;
+  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
+  min-width:80px;
 }
 .ctrl-btn:hover { background:var(--card2); border-color:rgba(255,255,255,0.12); }
 .ctrl-btn.green { border-color:rgba(0,255,135,0.3); color:var(--green); }
@@ -917,142 +1202,87 @@ header::after {
 .ctrl-btn.red:hover { background:var(--red-dim); }
 .ctrl-btn.gold { border-color:rgba(255,209,0,0.3); color:var(--gold); }
 .ctrl-btn.gold:hover { background:var(--gold-dim); }
+.ctrl-btn.purple { border-color:rgba(176,106,255,0.3); color:var(--purple); }
+.ctrl-btn.purple:hover { background:var(--purple-dim); }
 
-.chat-area {
-  flex:1; overflow-y:auto;
-  padding:20px;
-  display:flex; flex-direction:column; gap:14px;
-}
+.chat-area { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px; }
 .chat-area::-webkit-scrollbar { width:2px; }
 .chat-area::-webkit-scrollbar-thumb { background:rgba(0,255,135,0.12); }
 
-.msg {
-  display:flex; gap:10px;
-  animation:msgIn 0.25s ease both;
-}
+.msg { display:flex; gap:10px; animation:msgIn 0.25s ease both; }
 @keyframes msgIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-
 .msg-av {
   width:30px; height:30px; border-radius:50%; flex-shrink:0;
-  display:flex; align-items:center; justify-content:center;
-  font-size:0.85rem;
+  display:flex; align-items:center; justify-content:center; font-size:0.85rem;
   background:linear-gradient(135deg, #00FF87, #00A854);
   box-shadow:0 0 12px rgba(0,255,135,0.2);
 }
 .msg-user .msg-av { background:linear-gradient(135deg, #FFD100, #FF9500); order:2; }
-
 .msg-bubble {
-  background:var(--card);
-  border:1px solid var(--border);
+  background:var(--card); border:1px solid var(--border);
   border-radius:14px; border-bottom-left-radius:3px;
-  padding:10px 14px;
-  font-size:0.84rem; line-height:1.6;
-  max-width:82%;
+  padding:10px 14px; font-size:0.84rem; line-height:1.6; max-width:82%;
 }
 .msg-user .msg-bubble {
-  background:rgba(255,209,0,0.07);
-  border-color:rgba(255,209,0,0.12);
-  border-bottom-left-radius:14px;
-  border-bottom-right-radius:3px;
-  margin-left:auto;
+  background:rgba(255,209,0,0.07); border-color:rgba(255,209,0,0.12);
+  border-bottom-left-radius:14px; border-bottom-right-radius:3px; margin-left:auto;
 }
 .msg-user { flex-direction:row-reverse; }
 
 .chat-input-row {
-  border-top:1px solid var(--border);
-  padding:12px 16px;
-  display:flex; gap:10px; align-items:center;
-  flex-shrink:0;
-  background:var(--surface);
+  border-top:1px solid var(--border); padding:12px 16px;
+  display:flex; gap:10px; align-items:center; flex-shrink:0; background:var(--surface);
 }
 .chat-inp {
-  flex:1;
-  background:var(--card);
-  border:1px solid var(--border2);
-  border-radius:10px;
-  padding:10px 14px;
-  color:var(--white);
-  font-family:'DM Sans',sans-serif;
-  font-size:0.84rem;
-  outline:none;
-  transition:border-color 0.2s;
+  flex:1; background:var(--card); border:1px solid var(--border2);
+  border-radius:10px; padding:10px 14px; color:var(--white);
+  font-family:'DM Sans',sans-serif; font-size:0.84rem; outline:none; transition:border-color 0.2s;
 }
 .chat-inp:focus { border-color:rgba(0,255,135,0.35); }
 .chat-inp::placeholder { color:var(--gray); }
-
 .send-btn {
   width:40px; height:40px; border-radius:50%;
   background:var(--green); border:none; cursor:pointer;
-  display:flex; align-items:center; justify-content:center;
-  transition:all 0.15s; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center; transition:all 0.15s; flex-shrink:0;
 }
 .send-btn:hover { background:var(--gold); transform:scale(1.06); }
 
 .log-entry {
-  font-family:'Space Mono',monospace;
-  font-size:0.62rem; color:var(--dim);
-  padding:5px 0;
-  border-bottom:1px solid rgba(255,255,255,0.02);
-  line-height:1.5;
-  word-break:break-word;
+  font-family:'Space Mono',monospace; font-size:0.62rem; color:var(--dim);
+  padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.02); line-height:1.5; word-break:break-word;
 }
-.log-entry.win { color:var(--green); }
+.log-entry.win  { color:var(--green); }
 .log-entry.info { color:var(--blue); opacity:0.8; }
+.log-entry.social { color:var(--purple); }
 
-.tabs {
-  display:flex; gap:0;
-  border-bottom:1px solid var(--border);
-  flex-shrink:0; background:var(--surface);
-}
+.tabs { display:flex; gap:0; border-bottom:1px solid var(--border); flex-shrink:0; background:var(--surface); }
 .tab-btn {
-  flex:1; padding:9px;
-  background:none; border:none;
-  font-family:'DM Sans',sans-serif;
-  font-size:0.7rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase;
-  color:var(--dim); cursor:pointer;
-  border-bottom:2px solid transparent;
-  transition:all 0.15s;
+  flex:1; padding:9px; background:none; border:none;
+  font-family:'DM Sans',sans-serif; font-size:0.7rem; font-weight:700;
+  letter-spacing:1px; text-transform:uppercase; color:var(--dim); cursor:pointer;
+  border-bottom:2px solid transparent; transition:all 0.15s;
 }
 .tab-btn.active { color:var(--green); border-bottom-color:var(--green); }
+.tab-btn.active.social-tab { color:var(--purple); border-bottom-color:var(--purple); }
 
 .tab-panel { display:none; flex:1; overflow:hidden; flex-direction:column; }
 .tab-panel.active { display:flex; }
 
-.empty {
-  text-align:center; padding:40px 20px;
-  color:var(--gray); font-size:0.78rem; line-height:1.8;
-}
+.empty { text-align:center; padding:40px 20px; color:var(--gray); font-size:0.78rem; line-height:1.8; }
 .empty-icon { font-size:2rem; margin-bottom:10px; display:block; opacity:0.5; }
 
 .approve-strip {
-  margin:0 0 10px;
-  padding:8px 12px;
-  background:var(--green-dim);
-  border:1px solid rgba(0,255,135,0.15);
-  border-radius:8px;
-  display:flex; align-items:center; justify-content:space-between;
+  margin:0 0 10px; padding:8px 12px;
+  background:var(--green-dim); border:1px solid rgba(0,255,135,0.15);
+  border-radius:8px; display:flex; align-items:center; justify-content:space-between;
   font-size:0.72rem; color:var(--green);
 }
 .approve-all-btn {
-  background:var(--green); color:#000;
-  border:none; border-radius:5px;
-  padding:4px 12px;
-  font-family:'DM Sans',sans-serif;
-  font-size:0.68rem; font-weight:700;
-  letter-spacing:1px; text-transform:uppercase;
-  cursor:pointer; transition:all 0.15s;
+  background:var(--green); color:#000; border:none; border-radius:5px;
+  padding:4px 12px; font-family:'DM Sans',sans-serif; font-size:0.68rem; font-weight:700;
+  letter-spacing:1px; text-transform:uppercase; cursor:pointer; transition:all 0.15s;
 }
 .approve-all-btn:hover { background:#00e07a; }
-
-.followup-banner {
-  margin-bottom:8px;
-  padding:8px 12px;
-  background:rgba(77,159,255,0.08);
-  border:1px solid rgba(77,159,255,0.15);
-  border-radius:8px;
-  font-size:0.7rem; color:var(--blue);
-}
 </style>
 </head>
 <body>
@@ -1065,7 +1295,6 @@ header::after {
       <p>YardLink Studio · Outreach Engine</p>
     </div>
   </div>
-
   <div class="header-center">
     <div class="stat-pill">
       <span class="stat-pill-icon">📤</span>
@@ -1078,7 +1307,14 @@ header::after {
       <span class="stat-pill-icon">🎯</span>
       <div class="stat-pill-info">
         <span class="stat-pill-num" id="leads-count">0</span>
-        <span class="stat-pill-label">Leads</span>
+        <span class="stat-pill-label">Contacts</span>
+      </div>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-pill-icon">📱</span>
+      <div class="stat-pill-info">
+        <span class="stat-pill-num" id="social-count">0</span>
+        <span class="stat-pill-label">Social Leads</span>
       </div>
     </div>
     <div class="stat-pill">
@@ -1089,7 +1325,6 @@ header::after {
       </div>
     </div>
   </div>
-
   <div class="status-badge">
     <div class="status-dot"></div>
     <span id="status-text">Online</span>
@@ -1098,65 +1333,82 @@ header::after {
 
 <div class="main">
 
+  <!-- LEFT PANEL: EMAIL LEADS -->
   <div class="panel">
-    <div class="tabs">
-      <button class="tab-btn active" onclick="switchTab(\'leads\',this)">Pending</button>
-      <button class="tab-btn" onclick="switchTab(\'sent\',this)">Sent</button>
+    <div class="panel-header">
+      <span class="panel-title">Email Leads</span>
+      <span class="panel-badge" id="email-badge">0</span>
     </div>
-
-    <div class="tab-panel active" id="tab-leads">
-      <div class="panel-body" id="leads-panel">
-        <div class="empty">
-          <span class="empty-icon">🎯</span>
-          No leads yet Kevin.<br>Hit Scan and let's find some.
-        </div>
-      </div>
-    </div>
-
-    <div class="tab-panel" id="tab-sent">
-      <div class="panel-body" id="sent-panel">
-        <div class="empty">
-          <span class="empty-icon">📤</span>
-          No emails sent yet.
-        </div>
-      </div>
+    <div class="panel-body" id="leads-panel">
+      <div class="empty"><span class="empty-icon">🎯</span>Run a scan to find leads.</div>
     </div>
   </div>
 
+  <!-- CENTER PANEL: CHAT + CONTROLS -->
   <div class="center-panel">
     <div class="controls">
       <button class="ctrl-btn green" onclick="startScan()">▶ Scan</button>
-      <button class="ctrl-btn red" onclick="stopScan()">■ Stop</button>
-      <button class="ctrl-btn gold" onclick="triggerFollowups()">📬 Follow-ups</button>
+      <button class="ctrl-btn red"   onclick="stopScan()">■ Stop</button>
+      <button class="ctrl-btn gold"  onclick="runFollowups()">↩ Follow-ups</button>
+      <button class="ctrl-btn purple" onclick="exportCSV()">⬇ Export CSV</button>
     </div>
 
-    <div class="chat-area" id="chat">
-      <div class="msg">
-        <div class="msg-av">W</div>
-        <div class="msg-bubble">
-          What's good Kevin. I find businesses, pull their emails, and write the outreach. You approve, I send. Hit Scan when you\'re ready.
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('chat', this)">💬 Winston</button>
+      <button class="tab-btn"        onclick="switchTab('sent', this)">📤 Sent</button>
+      <button class="tab-btn social-tab" onclick="switchTab('social', this)">📱 Social DMs</button>
+      <button class="tab-btn"        onclick="switchTab('log', this)">🔍 Log <span id="log-count" style="font-size:0.6rem;opacity:0.6"></span></button>
+    </div>
+
+    <!-- CHAT TAB -->
+    <div class="tab-panel active" id="tab-chat">
+      <div class="chat-area" id="chat-area">
+        <div class="msg">
+          <div class="msg-av">W</div>
+          <div class="msg-bubble">
+            Yo Kevin. Winston's upgraded — now tracking emails, social handles, AND phone numbers. Every lead goes into the contacts DB. Export to CSV any time. Let's get it.
+          </div>
         </div>
+      </div>
+      <div class="chat-input-row">
+        <input class="chat-inp" id="chat-inp" placeholder="Ask Winston anything..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="send-btn" onclick="sendChat()">→</button>
       </div>
     </div>
 
-    <div class="chat-input-row">
-      <input class="chat-inp" id="chat-input" placeholder="Talk to Winston..." onkeydown="if(event.key===\'Enter\')sendMsg()">
-      <button class="send-btn" onclick="sendMsg()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="#000"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
-      </button>
+    <!-- SENT TAB -->
+    <div class="tab-panel" id="tab-sent">
+      <div class="panel-body" id="sent-panel">
+        <div class="empty"><span class="empty-icon">📤</span>No emails sent yet.</div>
+      </div>
+    </div>
+
+    <!-- SOCIAL DMS TAB -->
+    <div class="tab-panel" id="tab-social">
+      <div style="padding:8px 12px;background:rgba(176,106,255,0.06);border-bottom:1px solid rgba(176,106,255,0.12);font-size:0.7rem;color:var(--purple);flex-shrink:0;">
+        📱 These businesses have no email — outreach via Instagram/Facebook DM manually. Copy the message and send from <strong>@yardlinkstudio</strong>.
+      </div>
+      <div class="panel-body" id="social-panel">
+        <div class="empty"><span class="empty-icon">📱</span>Social leads will appear here after scanning.</div>
+      </div>
+    </div>
+
+    <!-- LOG TAB -->
+    <div class="tab-panel" id="tab-log">
+      <div class="panel-body" id="log-panel">
+        <div class="empty"><span class="empty-icon">📋</span>Waiting for activity...</div>
+      </div>
     </div>
   </div>
 
+  <!-- RIGHT PANEL: SENT HISTORY + CONTACTS -->
   <div class="panel">
     <div class="panel-header">
-      <div class="panel-title">Activity Log</div>
-      <div class="panel-badge" id="log-count">0</div>
+      <span class="panel-title">Contacted</span>
+      <span class="panel-badge gold" id="sent-badge">0</span>
     </div>
-    <div class="panel-body" id="log-panel">
-      <div class="empty">
-        <span class="empty-icon">📋</span>
-        Waiting for activity...
-      </div>
+    <div class="panel-body" id="right-sent-panel">
+      <div class="empty"><span class="empty-icon">📬</span>Nobody contacted yet.</div>
     </div>
   </div>
 
@@ -1164,191 +1416,229 @@ header::after {
 
 <script>
 let pendingLeads = [];
-let sentLeads = [];
-let activeTab = \'leads\';
+let sentLeads    = [];
+let socialLeads  = [];
 
-function switchTab(tab, el) {
-  activeTab = tab;
-  document.querySelectorAll(\'.tab-btn\').forEach(b => b.classList.remove(\'active\'));
-  document.querySelectorAll(\'.tab-panel\').forEach(p => p.classList.remove(\'active\'));
-  el.classList.add(\'active\');
-  document.getElementById(\'tab-\' + tab).classList.add(\'active\');
+function escapeHTML(value) {
+  const span = document.createElement('span');
+  span.textContent = value == null ? '' : String(value);
+  return span.innerHTML;
 }
 
-function addMsg(text, isUser=false) {
-  const chat = document.getElementById(\'chat\');
-  const div = document.createElement(\'div\');
-  div.className = \'msg\' + (isUser ? \' msg-user\' : \'\');
-  div.innerHTML = `
-    <div class="msg-av">${isUser ? 'K' : 'W'}</div>
-    <div class="msg-bubble">${text}</div>
-  `;
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
 }
 
-async function sendMsg() {
-  const inp = document.getElementById(\'chat-input\');
-  const text = inp.value.trim();
-  if (!text) return;
-  inp.value = \'\';
-  addMsg(text, true);
-  const res = await fetch(\'/chat\', {
-    method: \'POST\',
-    headers: {\'Content-Type\':\'application/json\'},
-    body: JSON.stringify({message: text})
-  });
+function togglePreview(el) { el.classList.toggle('expanded'); }
+
+async function sendChat() {
+  const inp = document.getElementById('chat-inp');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  appendMsg(msg, 'user');
+  const res  = await fetch('/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
   const data = await res.json();
-  addMsg(data.reply);
+  appendMsg(data.reply, 'winston');
+}
+
+function appendMsg(text, who) {
+  const area = document.getElementById('chat-area');
+  const div  = document.createElement('div');
+  div.className = 'msg' + (who === 'user' ? ' msg-user' : '');
+  div.innerHTML = `<div class="msg-av">${who==='user'?'K':'W'}</div><div class="msg-bubble">${escapeHTML(text)}</div>`;
+  area.appendChild(div);
+  area.scrollTop = area.scrollHeight;
 }
 
 async function startScan() {
-  addMsg("On it. Scanning NYC and Long Island now, give me a minute...");
-  fetch(\'/scan\', {method:\'POST\'});
-  document.getElementById(\'status-text\').textContent = \'Scanning...\';
-  document.querySelector(\'.status-dot\').style.background = \'#FFD100\';
+  await fetch('/scan', {method:'POST'});
+  appendMsg('Scan started. Finding leads across NYC and Long Island.', 'winston');
 }
 
-function stopScan() {
-  fetch(\'/stop\', {method:\'POST\'});
-  addMsg("Stopped. Check your pending leads Kevin.");
-  document.getElementById(\'status-text\').textContent = \'Online\';
-  document.querySelector(\'.status-dot\').style.background = \'var(--green)\';
+async function stopScan() {
+  await fetch('/stop', {method:'POST'});
+  appendMsg('Scan stopped.', 'winston');
 }
 
-async function triggerFollowups() {
-  addMsg("Running follow-up check — any lead that didn\'t reply in 3+ days is getting a bump 📬");
-  const res = await fetch(\'/followups\', {method:\'POST\'});
+async function runFollowups() {
+  const res  = await fetch('/followups', {method:'POST'});
   const data = await res.json();
-  addMsg(`Sent ${data.sent} follow-ups. We stay on them Kevin.`);
-  document.getElementById(\'followups-sent\').textContent = data.total_followups;
-  refreshAll();
+  appendMsg(`Follow-ups checked. ${data.sent} sent today.`, 'winston');
 }
 
-async function approveLead(idx) {
-  const res = await fetch(\'/approve\', {
-    method:\'POST\',
-    headers:{\'Content-Type\':\'application/json\'},
-    body: JSON.stringify({index: idx})
-  });
+async function exportCSV() {
+  appendMsg('Exporting contacts to CSV...', 'winston');
+  window.location.href = '/export_csv';
+}
+
+function scoreClass(score) {
+  if (score >= 8) return 'score-high';
+  if (score >= 5) return 'score-mid';
+  return 'score-low';
+}
+
+async function approveLead(i) {
+  const res  = await fetch('/approve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
   const data = await res.json();
   if (data.success) {
-    addMsg(`Sent to ${data.name}. That one\'s in the pipeline.`);
-    document.getElementById(\'emails-sent\').textContent = data.total_sent;
-    refreshAll();
+    appendMsg(`Draft for ${data.name} approved. It has not been sent.`, 'winston');
+    refreshLeads();
   }
 }
 
-async function rejectLead(idx) {
-  await fetch(\'/reject\', {
-    method:\'POST\',
-    headers:{\'Content-Type\':\'application/json\'},
-    body: JSON.stringify({index: idx})
-  });
-  refreshAll();
+async function rejectLead(i) {
+  await fetch('/reject', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
+  refreshLeads();
 }
 
 async function approveAll() {
-  const res = await fetch(\'/approve_all\', {method:\'POST\'});
+  const res  = await fetch('/approve_all', {method:'POST'});
   const data = await res.json();
-  addMsg(`Sent ${data.sent} emails in one shot. Let\'s go Kevin.`);
-  document.getElementById(\'emails-sent\').textContent = data.total_sent;
-  refreshAll();
-}
-
-function togglePreview(el) {
-  el.classList.toggle(\'expanded\');
+  appendMsg(`Approved ${data.approved} drafts. Nothing was sent.`, 'winston');
+  refreshLeads();
 }
 
 async function refreshLeads() {
-  const res = await fetch(\'/leads\');
+  const res  = await fetch('/leads');
   const data = await res.json();
   pendingLeads = data.leads;
-  document.getElementById(\'leads-count\').textContent = data.total_found;
+  document.getElementById('email-badge').textContent  = pendingLeads.length;
+  document.getElementById('leads-count').textContent  = data.total_found;
 
-  const panel = document.getElementById(\'leads-panel\');
+  const panel = document.getElementById('leads-panel');
   if (pendingLeads.length === 0) {
-    panel.innerHTML = \'<div class="empty"><span class="empty-icon">🎯</span>No pending leads.<br>Start a scan to find some!</div>\';
+    panel.innerHTML = \'<div class="empty"><span class="empty-icon">🎯</span>No email leads queued.</div>\';
     return;
   }
-
-  let html = \'\';
-  if (pendingLeads.length > 1) {
-    html += `<div class="approve-strip"><span>${pendingLeads.length} leads ready</span><button class="approve-all-btn" onclick="approveAll()">Send All</button></div>`;
-  }
-  html += pendingLeads.map((b, i) => `
+  const strip = pendingLeads.length > 1
+    ? `<div class="approve-strip"><span>${pendingLeads.length} leads ready</span><button class="approve-all-btn" onclick="approveAll()">Approve All</button></div>`
+    : \'\';
+  const html = strip + pendingLeads.map((b,i) => {
+    const score = b.email_score || 0;
+    const social = b.social || {};
+    const socialLine = [
+      social.instagram ? `IG: @${social.instagram}` : \'\',
+      social.facebook  ? `FB: ${social.facebook}` : \'\',
+    ].filter(Boolean).join(' · ');
+    return `
     <div class="lead-card">
-      <div class="lead-name">${b.name}</div>
-      <div class="lead-email">${b.email}</div>
-      <div class="lead-meta">${b.type || \'Business\'} · ${b.address || \'NYC\'}</div>
-      ${b.subject ? `<div class="lead-subject">📧 "${b.subject}"</div>` : \'\'}
-      <div class="email-preview" onclick="togglePreview(this)">${b.draft || \'Drafting...\'}</div>
+      <div class="lead-name">${escapeHTML(b.name)}</div>
+      ${b.email ? `<div class="lead-email">${escapeHTML(b.email)} <span class="email-score ${scoreClass(score)}">(${score}/10)</span></div>` : \'\'}
+      ${b.phone ? `<div class="lead-phone">📞 ${escapeHTML(b.phone)}</div>` : \'\'}
+      ${socialLine ? `<div class="lead-social">📱 ${escapeHTML(socialLine)}</div>` : \'\'}
+      <div class="lead-meta">${escapeHTML(b.type || \'Business\')} · ${escapeHTML(b.address || \'NYC\')}</div>
+      ${b.subject ? `<div class="lead-subject">📧 "${escapeHTML(b.subject)}"</div>` : \'\'}
+      <div class="email-preview" onclick="togglePreview(this)">${escapeHTML(b.draft || \'Drafting...\')}</div>
       <div class="lead-actions">
-        <button class="btn-approve" onclick="approveLead(${i})">✓ Send</button>
-        <button class="btn-reject" onclick="rejectLead(${i})">✗ Skip</button>
+        <button class="btn-approve" onclick="approveLead(${i})">✓ Approve</button>
+        <button class="btn-reject"  onclick="rejectLead(${i})">✗ Skip</button>
       </div>
-    </div>
-  `).join(\'\');
+    </div>`;
+  }).join(\'\');
   panel.innerHTML = html;
 }
 
-async function refreshSent() {
-  const res = await fetch(\'/sent\');
+async function refreshSocial() {
+  const res  = await fetch('/social_leads?limit=100');
   const data = await res.json();
-  sentLeads = data.sent;
-  document.getElementById(\'emails-sent\').textContent = data.total_sent;
-  document.getElementById(\'followups-sent\').textContent = data.total_followups;
+  socialLeads = data.leads;
+  document.getElementById('social-count').textContent = data.total;
 
-  const panel = document.getElementById(\'sent-panel\');
-  if (sentLeads.length === 0) {
-    panel.innerHTML = \'<div class="empty"><span class="empty-icon">📤</span>No emails sent yet.</div>\';
+  const panel = document.getElementById('social-panel');
+  if (socialLeads.length === 0) {
+    panel.innerHTML = \'<div class="empty"><span class="empty-icon">📱</span>Social leads will appear here after scanning.</div>\';
     return;
   }
-  panel.innerHTML = sentLeads.slice().reverse().map(s => `
+  panel.innerHTML = socialLeads.map(b => {
+    const social = b.social || {};
+    const ig     = social.instagram ? `@${social.instagram}` : \'\';
+    const fb     = social.facebook  ? social.facebook : \'\';
+    return `
+    <div class="lead-card social-card">
+      <div class="lead-name">${escapeHTML(b.name)}</div>
+      ${ig ? `<div class="lead-social">📸 ${escapeHTML(ig)}</div>` : \'\'}
+      ${fb ? `<div class="lead-social">👥 fb.com/${escapeHTML(fb)}</div>` : \'\'}
+      ${b.phone ? `<div class="lead-phone">📞 ${escapeHTML(b.phone)}</div>` : \'\'}
+      <div class="lead-meta">${escapeHTML(b.type || \'Business\')} · ${escapeHTML(b.address || \'NYC\')}</div>
+      ${b.dm_ig ? `<div class="dm-label">IG DM</div><div class="dm-preview" onclick="togglePreview(this)">${escapeHTML(b.dm_ig)}</div>` : \'\'}
+      ${b.dm_fb ? `<div class="dm-label">FB Message</div><div class="dm-preview" onclick="togglePreview(this)">${escapeHTML(b.dm_fb)}</div>` : \'\'}
+    </div>`;
+  }).join(\'\');
+}
+
+async function refreshSent() {
+  const res  = await fetch('/sent?limit=100');
+  const data = await res.json();
+  sentLeads  = data.sent;
+  document.getElementById('emails-sent').textContent   = data.total_sent;
+  document.getElementById('followups-sent').textContent = data.total_followups;
+  document.getElementById('sent-badge').textContent    = data.total_sent;
+
+  const panels = [document.getElementById('sent-panel'), document.getElementById('right-sent-panel')];
+  if (sentLeads.length === 0) {
+    panels.forEach(p => { if(p) p.innerHTML = \'<div class="empty"><span class="empty-icon">📤</span>No emails sent yet.</div>\'; });
+    return;
+  }
+  const html = sentLeads.slice().reverse().map(s => `
     <div class="sent-card">
       <div class="sent-dot ${s.followup_sent ? \'followup\' : \'\'}"></div>
       <div class="sent-info">
-        <div class="sent-name">${s.name}</div>
-        <div class="sent-email">${s.email}</div>
+        <div class="sent-name">${escapeHTML(s.name)}</div>
+        <div class="sent-email">${escapeHTML(s.email)}</div>
       </div>
       <div class="sent-date">${s.sent_date ? s.sent_date.substring(0,10) : \'\'}</div>
     </div>
   `).join(\'\');
+  panels.forEach(p => { if(p) p.innerHTML = html; });
 }
 
 async function refreshLog() {
-  const res = await fetch(\'/log\');
+  const res  = await fetch('/log');
   const data = await res.json();
-  document.getElementById(\'log-count\').textContent = data.log.length;
-  const panel = document.getElementById(\'log-panel\');
+  document.getElementById('log-count').textContent = data.log.length;
+  const panel = document.getElementById('log-panel');
   if (data.log.length === 0) {
     panel.innerHTML = \'<div class="empty"><span class="empty-icon">📋</span>Waiting for activity...</div>\';
     return;
   }
   panel.innerHTML = data.log.slice(-80).reverse().map(l => {
     let cls = \'\';
-    if (l.includes(\'💰\') || l.includes(\'🔥\') || l.includes(\'sent\')) cls = \'win\';
+    if (l.includes(\'📧\') || l.includes(\'sent\') || l.includes(\'🔥\')) cls = \'win\';
+    else if (l.includes(\'📱\') || l.includes(\'Social\')) cls = \'social\';
     else if (l.includes(\'📬\') || l.includes(\'Found\') || l.includes(\'Scanning\')) cls = \'info\';
-    return `<div class="log-entry ${cls}">${l}</div>`;
+    return `<div class="log-entry ${cls}">${escapeHTML(l)}</div>`;
   }).join(\'\');
 }
 
 async function refreshStatus() {
-  const res = await fetch(\'/status\');
+  const res  = await fetch('/status');
   const data = await res.json();
-  document.getElementById(\'status-text\').textContent = data.status === \'scanning\' ? \'Scanning...\' : \'Online\';
-  document.querySelector(\'.status-dot\').style.background = data.status === \'scanning\' ? \'#FFD100\' : \'var(--green)\';
+  document.getElementById('status-text').textContent = data.status === \'scanning\' ? \'Scanning...\' : \'Online\';
+  document.querySelector('.status-dot').style.background = data.status === \'scanning\' ? \'#FFD100\' : \'var(--green)\';
 }
 
 function refreshAll() {
   refreshLeads();
   refreshSent();
+  refreshSocial();
   refreshLog();
   refreshStatus();
 }
 
-setInterval(refreshAll, 2500);
 refreshAll();
+setInterval(() => {
+  refreshLeads();
+  refreshLog();
+  refreshStatus();
+}, 2500);
+setInterval(() => {
+  refreshSent();
+  refreshSocial();
+}, 15000);
 </script>
 </body>
 </html>'''
@@ -1358,36 +1648,76 @@ refreshAll();
 # ============================================================
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    return render_template("dashboard.html")
+
+@app.route('/api/dashboard')
+def dashboard_data():
+    stats = load_stats()
+    contacts = repository.counts()
+    workflow = repository.workflow_counts()
+    ai = ai_service.status()
+    pending_ready = [lead for lead in state["pending"] if lead.get("workflow_stage", "draft") in ("draft", "reviewed")]
+    persisted_pending = sum(1 for lead in pending_ready if lead.get("draft_id"))
+    return jsonify({
+        "metrics": {
+            "contacts": contacts["contacts"],
+            "drafts_ready": len(pending_ready) + workflow["draft"] + workflow["reviewed"] - persisted_pending,
+            "approved": workflow["approved"],
+            "queued": workflow["queued"] + workflow["confirmed"],
+            "emails_sent": stats.get("emails_sent", 0),
+            "social_leads": len(load_social_leads()),
+        },
+        "workflow": workflow,
+        "scan_status": state["status"],
+        "automatic_followups": False,
+        "ai": ai,
+        "events": repository.recent_events(12),
+    })
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.json
-    user_msg = data.get('message', '')
-    stats = load_stats()
+    data     = request.get_json(silent=True) or {}
+    user_msg = str(data.get('message', '')).strip()
+    if not user_msg or len(user_msg) > 2000:
+        return jsonify({"error": "Message must contain 1–2000 characters"}), 400
+    stats    = load_stats()
+    contacts = load_contacts()
     try:
-        response = claude_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=300,
-            system=f"""You are Winston, a Gen Z Jamaican-American AI from NYC working for YardLink Studio.
-You are Winston, an AI outreach tool built for YardLink Studio. You help Kevin find business leads and send cold emails. Talk like a sharp, no-nonsense New Yorker. Be direct and helpful. No fluff. Refer to the user as Kevin. Keep it short.
-You help find clients for YardLink Studio (websites + AI tools for small businesses).
-Current stats: {stats['emails_sent']} emails sent, {stats.get('followups_sent',0)} follow-ups sent.
-Keep it short, punchy, never use markdown.""",
-            messages=[{"role": "user", "content": user_msg}]
-        )
-        return jsonify({"reply": response.content[0].text})
-    except Exception as e:
-        return jsonify({"reply": f"Something broke Kevin, my bad: {e}"})
+        system = f"""You are Winston, a Gen Z Jamaican-American AI from NYC working for YardLink Studio.
+You help Kevin find business leads and send cold emails. Talk like a sharp, no-nonsense New Yorker. Be direct and helpful. No fluff. Refer to the user as Kevin or Emperor Edwards occasionally.
+Stats: {stats.get('emails_sent',0)} emails sent, {stats.get('followups_sent',0)} follow-ups, {stats.get('social_leads',0)} social leads, {len(contacts)} total contacts in DB.
+Keep it short and punchy. Never use markdown."""
+        response = ai_service.generate(user_msg, system=system, max_tokens=300, purpose="chat")
+        return jsonify({"reply": response.text, "provider": response.provider, "model": response.model})
+    except ProviderError:
+        return jsonify({"error": "No zero-cost AI provider is currently available. Configure Gemini or start Ollama."}), 503
+
+@app.route('/ai/status')
+def ai_status():
+    return jsonify(ai_service.status())
 
 @app.route('/scan', methods=['POST'])
 def scan():
-    if state["status"] == "scanning":
-        return jsonify({"status": "already scanning"})
+    if state["status"] in ("scanning", "drafting_existing"):
+        return jsonify({"status": "already running"}), 409
     t = threading.Thread(target=run_scan, args=(PLACE_SEARCHES,))
     t.daemon = True
     t.start()
     return jsonify({"status": "scanning"})
+
+@app.route('/draft-existing', methods=['POST'])
+def draft_existing():
+    if state["status"] in ("scanning", "drafting_existing"):
+        return jsonify({"error": "Another Winston job is already running"}), 409
+    data = request.get_json(silent=True) or {}
+    limit = data.get("limit", 10)
+    if not isinstance(limit, int) or not 1 <= limit <= 50:
+        return jsonify({"error": "Batch limit must be an integer from 1 to 50"}), 400
+    state["status"] = "drafting_existing"
+    state["existing_draft_progress"] = {"requested": limit, "completed": 0, "failed": 0}
+    thread = threading.Thread(target=run_existing_contact_drafts, args=(limit,), daemon=True)
+    thread.start()
+    return jsonify({"status": "drafting_existing", "limit": limit})
 
 @app.route('/stop', methods=['POST'])
 def stop():
@@ -1396,23 +1726,34 @@ def stop():
 
 @app.route('/status')
 def get_status():
-    return jsonify({"status": state["status"]})
+    return jsonify({"status": state["status"],
+                    "existing_draft_progress": state["existing_draft_progress"]})
 
 @app.route('/leads')
 def leads():
     return jsonify({
-        "leads": state["pending"],
-        "total_found": len(state["businesses"]) + len(state["pending"])
+        "leads":       state["pending"],
+        "total_found": len(load_contacts()),
+    })
+
+@app.route('/social_leads')
+def get_social_leads():
+    all_social = load_social_leads()
+    limit = max(1, min(request.args.get('limit', 200, type=int), 500))
+    return jsonify({
+        "leads": all_social[-limit:],
+        "total": len(all_social),
     })
 
 @app.route('/sent')
 def get_sent():
     followups = load_followups()
-    stats = load_stats()
+    stats     = load_stats()
+    limit     = max(1, min(request.args.get('limit', 200, type=int), 500))
     return jsonify({
-        "sent": followups,
-        "total_sent": stats.get("emails_sent", 0),
-        "total_followups": stats.get("followups_sent", 0)
+        "sent":             followups[-limit:],
+        "total_sent":       stats.get("emails_sent", 0),
+        "total_followups":  stats.get("followups_sent", 0),
     })
 
 @app.route('/log')
@@ -1421,100 +1762,135 @@ def get_log():
 
 @app.route('/approve', methods=['POST'])
 def approve():
-    data = request.json
-    idx = data.get('index', 0)
-    if idx >= len(state["pending"]):
-        return jsonify({"success": False})
-
-    b = state["pending"][idx]
-    subject = b.get("subject", f"Quick idea for {b['name']}")
-    success = send_email_fn(b["email"], b["name"], b["draft"], subject)
-
-    if success:
-        emailed = load_emailed()
-        emailed.append(b["email"])
-        save_emailed(emailed)
-
-        followups = load_followups()
-        followups.append({
-            "name": b["name"],
-            "email": b["email"],
-            "type": b.get("type", ""),
-            "address": b.get("address", "NYC"),
-            "subject": subject,
-            "original_body": b["draft"],
-            "sent_date": datetime.now().isoformat(),
-            "followup_sent": False,
-        })
-        save_followups(followups)
-
-        stats = load_stats()
-        stats["emails_sent"] = stats.get("emails_sent", 0) + 1
-        save_stats(stats)
-
-        state["emails_sent"] += 1
-        state["pending"].pop(idx)
-        log(f"Email sent to {b['name']} 💰")
-        return jsonify({"success": True, "name": b["name"], "total_sent": stats["emails_sent"]})
-
-    return jsonify({"success": False})
+    data = request.get_json(silent=True) or {}
+    idx = data.get("index")
+    if not isinstance(idx, int) or idx < 0 or idx >= len(state["pending"]):
+        return jsonify({"success": False, "error": "Invalid lead index"}), 400
+    business = state["pending"][idx]
+    contact_id, _ = repository.upsert_contact(business, "review_queue")
+    draft_id = business.get("draft_id")
+    if not draft_id:
+        draft_id = repository.create_draft(
+            contact_id,
+            business.get("subject", f"Quick idea for {business.get('name', 'your business')}"),
+            business.get("draft", ""),
+        )
+        business["draft_id"] = draft_id
+    draft = repository.get_draft(draft_id)
+    if draft and draft["stage"] == "draft":
+        repository.transition_draft(draft_id, "reviewed")
+    if repository.get_draft(draft_id)["stage"] == "reviewed":
+        repository.transition_draft(draft_id, "approved")
+    business["workflow_stage"] = "approved"
+    log(f"Draft approved for {business.get('name', 'lead')} — awaiting queue and confirmation")
+    return jsonify({"success": True, "name": business.get("name", "Lead"),
+                    "draft_id": draft_id, "stage": "approved"})
 
 @app.route('/approve_all', methods=['POST'])
 def approve_all():
-    sent = 0
-    emailed = load_emailed()
-    followups = load_followups()
-    stats = load_stats()
+    approved = 0
+    for idx in range(len(state["pending"])):
+        business = state["pending"][idx]
+        if business.get("workflow_stage") == "approved":
+            continue
+        contact_id, _ = repository.upsert_contact(business, "review_queue")
+        draft_id = repository.create_draft(contact_id, business.get("subject", ""), business.get("draft", ""))
+        repository.transition_draft(draft_id, "reviewed")
+        repository.transition_draft(draft_id, "approved")
+        business.update({"draft_id": draft_id, "workflow_stage": "approved"})
+        approved += 1
+    return jsonify({"approved": approved})
 
-    for b in state["pending"][:]:
-        subject = b.get("subject", f"Quick idea for {b['name']}")
-        if send_email_fn(b["email"], b["name"], b["draft"], subject):
-            emailed.append(b["email"])
-            followups.append({
-                "name": b["name"],
-                "email": b["email"],
-                "type": b.get("type", ""),
-                "address": b.get("address", "NYC"),
-                "subject": subject,
-                "original_body": b["draft"],
-                "sent_date": datetime.now().isoformat(),
-                "followup_sent": False,
-            })
-            stats["emails_sent"] = stats.get("emails_sent", 0) + 1
-            state["emails_sent"] += 1
-            sent += 1
-            log(f"Email sent to {b['name']} 💰")
-            time.sleep(8)
+@app.route('/drafts/<draft_id>/queue', methods=['POST'])
+def queue_draft(draft_id):
+    try:
+        job_id, created = repository.queue_draft(draft_id)
+        return jsonify({"success": True, "job_id": job_id, "created": created, "stage": "queued"})
+    except (KeyError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
-    save_emailed(emailed)
-    save_followups(followups)
-    save_stats(stats)
-    state["pending"] = []
-    return jsonify({"sent": sent, "total_sent": stats["emails_sent"]})
+@app.route('/send-jobs/<job_id>/confirm', methods=['POST'])
+def confirm_send(job_id):
+    """Explicit human-confirmation boundary; the only dashboard route that sends."""
+    try:
+        repository.confirm_send(job_id)
+        worker_id = f"web-{uuid.uuid4()}"
+        job = repository.claim_send(job_id, worker_id)
+        if not job:
+            return jsonify({"success": False, "error": "Job unavailable or recipient suppressed"}), 409
+        success = send_email_fn(job["email"], job["name"], job["body"], job["subject"])
+        repository.complete_send(job_id, success=success, error="SMTP delivery failed" if not success else "")
+        if not success:
+            return jsonify({"success": False, "error": "SMTP delivery failed"}), 502
+        emailed = load_emailed()
+        if job["email"].casefold() not in {str(value).casefold() for value in emailed}:
+            emailed.append(job["email"])
+            save_emailed(emailed)
+        stats = load_stats()
+        stats["emails_sent"] = stats.get("emails_sent", 0) + 1
+        save_stats(stats)
+        state["emails_sent"] += 1
+        state["pending"] = [lead for lead in state["pending"] if lead.get("draft_id") != job["draft_id"]]
+        log(f"Confirmed email sent to {job['name']}")
+        return jsonify({"success": True, "stage": "sent", "job_id": job_id})
+    except (KeyError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
 @app.route('/reject', methods=['POST'])
 def reject():
-    data = request.json
-    idx = data.get('index', 0)
-    if idx < len(state["pending"]):
-        state["pending"].pop(idx)
+    data = request.get_json(silent=True) or {}
+    idx = data.get("index")
+    if not isinstance(idx, int) or idx < 0 or idx >= len(state["pending"]):
+        return jsonify({"success": False, "error": "Invalid lead index"}), 400
+    business = state["pending"].pop(idx)
+    repository.add_event("lead.rejected", entity_type="contact", actor="user",
+                         details={"name": str(business.get("name", ""))[:120]})
+    return jsonify({"success": True})
+
+@app.route('/skip', methods=['POST'])
+def skip():
+    data = request.get_json(silent=True) or {}
+    idx = data.get("index")
+    if not isinstance(idx, int) or idx < 0 or idx >= len(state["pending"]):
+        return jsonify({"success": False, "error": "Invalid lead index"}), 400
+    business = state["pending"].pop(idx)
+    repository.add_event("lead.skipped", entity_type="contact", actor="user",
+                         details={"name": str(business.get("name", ""))[:120]})
     return jsonify({"success": True})
 
 @app.route('/followups', methods=['POST'])
 def run_followups():
-    sent = check_and_send_followups()
-    stats = load_stats()
-    return jsonify({"sent": sent, "total_followups": stats.get("followups_sent", 0)})
+    return jsonify({
+        "sent": 0, "enabled": False,
+        "error": "The legacy follow-up sender was permanently removed. All sending must go "
+                 "through the draft/approve/queue/confirm state machine.",
+    }), 410
+
+@app.route('/health')
+def health():
+    try:
+        counts = repository.counts()
+        return jsonify({"status": "ok", "database": "ok", "counts": counts,
+                        "automatic_followups": False, "ai_mode": ai_service.status()["mode"]})
+    except Exception:
+        return jsonify({"status": "degraded", "database": "unavailable"}), 503
+
+@app.route('/export_csv')
+def export_csv():
+    """Download the full contacts database as a CSV file."""
+    csv_data = generate_csv()
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename=winston_contacts_{datetime.now().strftime('%Y%m%d')}.csv"}
+    )
 
 if __name__ == '__main__':
     stats = load_stats()
     state["emails_sent"] = stats.get("emails_sent", 0)
+    state["social_pending"] = load_social_leads()
 
-    ft = threading.Thread(target=followup_scheduler)
-    ft.daemon = True
-    ft.start()
-
-    print("\nWinston is starting up...")
+    print("\nWinston v2 is starting up...")
     print("Dashboard: http://localhost:5000")
     print("Press Ctrl+C to stop\n")
     app.run(debug=False, port=5000)

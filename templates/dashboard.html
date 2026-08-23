@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Winston · AI Sales Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='command-center.css') }}">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="brand-mark">W</span><span><b>WINSTON</b><small>YARDLINK STUDIO</small></span></div>
+    <nav class="nav-groups" aria-label="Primary navigation">
+      <button class="nav-item" data-view="overview"><span>⌂</span>Overview</button>
+      <button class="nav-item active" data-view="editorial"><span>▣</span>Editorial Review <em id="nav-review-count">0</em></button>
+      <button class="nav-item" id="nav-live"><span>◌</span>Live Operations <i></i></button>
+      <button class="nav-item" data-filter="no-website"><span>△</span>No Website</button>
+      <button class="nav-item" data-view="leads"><span>♙</span>Leads</button>
+      <button class="nav-item" data-view="sent"><span>✉</span>Sent History</button>
+      <button class="nav-item" data-view="social"><span>◎</span>Social Leads</button>
+      <button class="nav-item" data-view="activity"><span>◈</span>Activity</button>
+    </nav>
+    <div class="provider-card">
+      <div class="card-kicker">AI MODE <span id="ai-mode">ZERO-COST</span></div>
+      <div class="provider-row"><span>Primary</span><b id="primary-provider">Checking…</b><i></i></div>
+      <div class="provider-row"><span>Fallback</span><b id="fallback-provider">Ollama</b><i></i></div>
+      <div class="budget"><span>Estimated Cost</span><strong id="ai-cost">$0.00</strong></div>
+    </div>
+    <div class="account"><span class="avatar">K</span><span><b>Kevin Edwards</b><small>Owner</small></span></div>
+  </aside>
+
+  <div class="main-shell">
+    <header class="topbar">
+      <button class="mobile-menu" id="mobile-menu" aria-label="Toggle navigation">☰</button>
+      <label class="global-search"><span>⌕</span><input id="global-search" placeholder="Search leads, businesses, emails…"><kbd>⌘ K</kbd></label>
+      <div class="top-actions">
+        <div class="mode-chip">AI MODE <b id="top-ai-mode">ZERO-COST</b></div>
+        <button class="icon-button" id="export-button" title="Export contacts">⇩</button>
+        <div class="online"><i></i><span id="online-label">ONLINE</span></div>
+      </div>
+    </header>
+
+    <section class="metrics" aria-label="Live Winston metrics">
+      <article><span class="metric-icon green">◇</span><div><small>Contacts</small><strong id="metric-contacts">—</strong><em>Canonical database</em></div></article>
+      <article><span class="metric-icon blue">▤</span><div><small>Drafts Ready</small><strong id="metric-drafts">—</strong><em>Needs review</em></div></article>
+      <article><span class="metric-icon cyan">✉</span><div><small>Emails Sent</small><strong id="metric-sent">—</strong><em>Confirmed sends</em></div></article>
+      <article><span class="metric-icon purple">✓</span><div><small>Approved</small><strong id="metric-approved">—</strong><em>Awaiting queue</em></div></article>
+      <article><span class="metric-icon amber">⌛</span><div><small>Queued</small><strong id="metric-queued">—</strong><em>Confirmation required</em></div></article>
+      <article><span class="metric-icon green">◎</span><div><small>Social Leads</small><strong id="metric-social">—</strong><em>Manual outreach</em></div></article>
+    </section>
+
+    <main class="content">
+      <div class="content-heading">
+        <div><h1>Editorial Review Dashboard</h1><p>Review, approve, queue, and explicitly confirm personalized outreach.</p></div>
+        <div class="heading-actions"><span id="position-label">0 of 0</span><button id="prev-lead" title="Previous lead">‹</button><button id="next-lead" title="Next lead">›</button><button id="shortcuts-button">Keyboard Shortcuts</button></div>
+      </div>
+
+      <div class="workspace">
+        <aside class="queue-panel card">
+          <div class="panel-title"><b>REVIEW QUEUE (<span id="queue-count">0</span>)</b><button id="filter-toggle" title="Filters">▽</button></div>
+          <label class="queue-search"><span>⌕</span><input id="queue-search" placeholder="Search leads…"></label>
+          <div class="filters" id="filters">
+            <label>Status<select id="status-filter"><option value="all">All statuses</option><option value="draft">Draft ready</option><option value="approved">Approved</option><option value="queued">Queued</option></select></label>
+            <label>Contact<select id="contact-filter"><option value="all">All confidence</option><option value="email">Has email</option><option value="phone">Has phone</option><option value="website">Has website</option></select></label>
+          </div>
+          <div class="queue-list" id="queue-list"><div class="empty-state">Loading review queue…</div></div>
+          <footer class="queue-footer"><span id="queue-range">0 leads</span><span>↑↓ navigate</span></footer>
+        </aside>
+
+        <section class="review-panel card" id="review-panel">
+          <div class="empty-workspace" id="empty-workspace"><span>◇</span><h2>No drafts waiting</h2><p>Create drafts from existing contacts with local Ollama—no Google discovery calls.</p><button class="primary" id="empty-draft-existing">Draft 10 Existing Contacts</button></div>
+          <div class="lead-workspace hidden" id="lead-workspace">
+            <header class="lead-header">
+              <div><h2 id="lead-name">Lead</h2><p id="lead-meta">Business · New York</p></div>
+              <div class="lead-header-actions"><a id="open-website" target="_blank" rel="noopener">Open Website ↗</a></div>
+            </header>
+            <div class="contact-strip"><a id="lead-site"></a><span id="lead-phone"></span><span id="lead-email"></span></div>
+            <div class="tabs" role="tablist"><button class="active" data-tab="overview">Overview</button><button data-tab="outreach">Outreach</button><button data-tab="activity">Activity</button></div>
+            <div class="lead-overview" id="tab-overview">
+              <div class="site-preview">
+                <div class="browser-bar"><i></i><i></i><i></i><span id="preview-url">Website preview</span></div>
+                <div class="preview-body" id="preview-body"><span>W</span><h3>Website preview</h3><p>Open the business website in a new tab for review.</p></div>
+              </div>
+              <aside class="score-summary">
+                <small>Contact Completeness</small><strong><span id="completeness-score">0</span><em>/100</em></strong><div class="score-ring" id="score-ring"></div>
+                <dl><div><dt>Email</dt><dd id="has-email">—</dd></div><div><dt>Phone</dt><dd id="has-phone">—</dd></div><div><dt>Website</dt><dd id="has-website">—</dd></div></dl>
+                <p>This score reflects available contact fields only. Website opportunity scoring begins in Phase 5.</p>
+              </aside>
+            </div>
+            <div class="draft-editor" id="tab-outreach">
+              <label>Subject Line <input id="draft-subject" readonly><span id="subject-count">0</span></label>
+              <label>Email Draft <textarea id="draft-body" readonly></textarea><span id="body-count">0</span></label>
+            </div>
+            <div class="activity-tab hidden" id="tab-activity"><div id="lead-events" class="event-list"></div></div>
+            <footer class="review-actions">
+              <button class="ghost" id="skip-button">× Skip</button>
+              <button class="danger" id="reject-button">⊘ Reject</button>
+              <button class="secondary" id="approve-button">✓ Approve Draft</button>
+              <button class="primary hidden" id="queue-button">Queue Approved Draft</button>
+              <button class="confirm hidden" id="confirm-button">Confirm & Send</button>
+            </footer>
+          </div>
+        </section>
+
+        <aside class="intel-panel">
+          <section class="card intel-card"><div class="panel-title"><b>Lead Intelligence</b><span class="safe-label">FACTUAL</span></div><div id="intel-content" class="intel-empty">Select a lead to inspect verified contact data.</div></section>
+          <section class="card intel-card"><div class="panel-title"><b>History & Activity</b><span>LIVE</span></div><div class="event-list" id="activity-list"><div class="intel-empty">No activity yet.</div></div></section>
+          <section class="card intel-card"><div class="panel-title"><b>Safety & Status</b></div><div class="safety-list"><p><i class="ok">✓</i> Explicit confirmation required</p><p><i class="ok">✓</i> Duplicate send locking active</p><p><i class="ok">✓</i> Suppression checked at send</p><p><i class="warn">!</i> Follow-ups disabled</p></div></section>
+          <section class="card operation-card"><button class="primary" id="draft-existing-button">◇ Draft Existing (Free)</button><button class="paid-scan" id="scan-button" title="Uses Google Places API and may incur charges">▶ Google Scan $</button><button class="danger" id="stop-button">■ Stop</button></section>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+
+<dialog id="shortcuts-dialog"><form method="dialog"><header><h2>Keyboard Shortcuts</h2><button>×</button></header><dl><div><dt>Next / previous lead</dt><dd><kbd>J</kbd> <kbd>K</kbd></dd></div><div><dt>Approve draft</dt><dd><kbd>A</kbd></dd></div><div><dt>Reject lead</dt><dd><kbd>R</kbd></dd></div><div><dt>Focus search</dt><dd><kbd>⌘</kbd> <kbd>K</kbd></dd></div><div><dt>Close dialog</dt><dd><kbd>Esc</kbd></dd></div></dl></form></dialog>
+<dialog id="confirm-dialog"><form method="dialog"><header><h2>Confirm Email Send</h2></header><p>This is the final human confirmation. Gmail will send this message immediately and the idempotency lock will prevent duplicate delivery.</p><div class="dialog-actions"><button value="cancel">Cancel</button><button value="confirm" class="confirm">Confirm & Send</button></div></form></dialog>
+<div class="toast" id="toast" role="status"></div>
+<script src="{{ url_for('static', filename='command-center.js') }}" defer></script>
+</body>
+</html>

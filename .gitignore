@@ -1,4 +1,55 @@
+# ── Secrets ────────────────────────────────────────────────
 .env
-.DS_Store
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+
+# ── PII / prospect data — NEVER commit ─────────────────────
+# Removed from history 2026-08-23; see docs/PII-REMEDIATION.md
+contacts.json
+social_leads.json
+emailed.json
+followups.json
+stats.json
+migration-report.json
+*_contacts.json
+*_leads.json
+*_prospects.json
+*-export.csv
+*_export.csv
+exports/
+backups/
+
+# ── Databases ──────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ── Screenshots / captures (may render prospect data) ──────
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+!docs/assets/*.svg
+
+# ── Python ─────────────────────────────────────────────────
 venv/
+.venv/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# ── OS / editor ────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
