@@ -1514,6 +1514,10 @@ if __name__ == '__main__':
     rehydrate_pending_queue()
 
     print("\nWinston v2 is starting up...")
-    print("Dashboard: http://localhost:5000")
     print("Press Ctrl+C to stop\n")
-    app.run(debug=False, port=5000)
+    # macOS ControlCenter (AirPlay Receiver) binds *:5000, so the port is configurable
+    # rather than a fixed value that collides with the OS on a default install.
+    port = int(os.getenv("WINSTON_PORT", "5001"))
+    host = os.getenv("WINSTON_HOST", "127.0.0.1")
+    print(f"Dashboard: http://{host}:{port}")
+    app.run(debug=False, host=host, port=port)
