@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Winston management CLI.
+#
+# Named winstonctl rather than winston because winston/ is the Python package;
+# an executable of the same name would shadow it on the import path.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+PORT="${WINSTON_PORT:-5001}"
+URL="http://127.0.0.1:${PORT}"
+LABEL="studio.yardlink.winston"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+LOG_DIR="$ROOT/logs"
+
+green() { printf "\033[0;32m%s\033[0m\n" "$1"; }
+red()   { printf "\033[0;31m%s\033[0m\n" "$1"; }
+amber() { printf "\033[0;33m%s\033[0m\n" "$1"; }
+
+python_bin() {
+  [ -x "$ROOT/venv/bin/python3" ] && echo "$ROOT/venv/bin/python3" || command -v python3
+}
+
+is_running() { curl -sf "$URL/health" >/dev/null 2>&1; }
+
+wait_for_health() {
+  for _ in $(seq 1 40); do is_running && return 0; sleep 0.5; done
+  return 1
+}
+
+cmd_start() {
+  if is_running; then green "Winston is already running at $URL"; return 0; fi
+  mkdir -p "$LOG_DIR"
+  if [ -f "$PLIST" ]; then
+    launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null
+  else
+    WINSTON_PORT="$PORT" nohup "$(python_bin)" winston_app.py \
+      >> "$LOG_DIR/winston.log" 2>> "$LOG_DIR/winston.error.log" &
+  fi
+  if wait_for_health; then green "Winston is running at $URL"; else
+    red "Winston did not become healthy. Recent errors:"
+    tail -20 "$LOG_DIR/winston.error.log" 2>/dev/null
+    return 1
+  fi
+}
+
+cmd_stop() {
+  [ -f "$PLIST" ] && launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null
+  if pkill -f "winston_app.py" 2>/dev/null; then green "Winston stopped."; else amber "Winston was not running."; fi
+}
+
+cmd_restart() { cmd_stop; sleep 1; cmd_start; }
+
+cmd_status() {
+  if is_running; then
+    green "● Winston is running at $URL"
+    "$(python_bin)" - <<PY
+import json, urllib.request
+with urllib.request.urlopen("$URL/health", timeout=5) as response:
+    h = json.load(response)
+print(f"  database        {h.get('database')}")
+print(f"  dry run         {h.get('dry_run')}")
+print(f"  AI mode         {h.get('ai_mode')}")
+print(f"  AI cost (month) \${h.get('ai_cost',{}).get('month_to_date_usd',0):.2f}")
+print(f"  contacts        {h.get('counts',{}).get('contacts','?')}")
+print(f"  drafts          {h.get('counts',{}).get('drafts','?')}")
+PY
+  else
+    red "● Winston is not running"
+    echo "  start it with: ./winstonctl start"
+    return 1
+  fi
+  if [ -f "$PLIST" ]; then green "● Autostart installed"; else amber "● Autostart not installed (./winstonctl install)"; fi
+}
+
+cmd_logs()   { tail -n 60 -f "$LOG_DIR/winston.log"; }
+cmd_errors() { tail -n 60 "$LOG_DIR/winston.error.log" 2>/dev/null || echo "No errors logged."; }
+cmd_open()   { is_running || cmd_start; open "$URL"; }
+
+cmd_backup() {
+  mkdir -p "$ROOT/data/backups"
+  local db="${WINSTON_DATABASE:-$ROOT/winston.db}"
+  local stamp target
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  target="$ROOT/data/backups/winston-${stamp}.db"
+  # .backup is safe against a live database. cp is not, because WAL writes may
+  # be in flight and would produce a torn copy.
+  sqlite3 "$db" ".backup '$target'" && green "Backup written: $target"
+  echo "  integrity: $(sqlite3 "$target" 'PRAGMA integrity_check;' | head -1)"
+  ls -t "$ROOT/data/backups"/winston-*.db 2>/dev/null | tail -n +15 | xargs rm -f 2>/dev/null
+  echo "  $(ls "$ROOT/data/backups"/winston-*.db 2>/dev/null | wc -l | tr -d ' ') backup(s) retained"
+}
+
+cmd_install()   { bash "$ROOT/scripts/install_winston_service.sh"; }
+cmd_uninstall() { bash "$ROOT/scripts/uninstall_winston_service.sh"; }
+cmd_doctor()    { "$(python_bin)" "$ROOT/scripts/doctor.py"; }
+
+case "${1:-help}" in
+  start)     cmd_start ;;
+  stop)      cmd_stop ;;
+  restart)   cmd_restart ;;
+  status)    cmd_status ;;
+  logs)      cmd_logs ;;
+  errors)    cmd_errors ;;
+  open)      cmd_open ;;
+  backup)    cmd_backup ;;
+  doctor)    cmd_doctor ;;
+  install)   cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  *)
+    cat <<USAGE
+Winston management
+
+  ./winstonctl start       start Winston
+  ./winstonctl stop        stop Winston
+  ./winstonctl restart     restart Winston
+  ./winstonctl status      running, healthy, and what state it is in
+  ./winstonctl open        open Winston in the browser
+  ./winstonctl logs        follow the application log
+  ./winstonctl errors      recent errors
+  ./winstonctl doctor      diagnose the whole setup
+  ./winstonctl backup      timestamped SQLite backup with integrity check
+  ./winstonctl install     start automatically at login (launchd)
+  ./winstonctl uninstall   remove autostart
+
+Winston runs at $URL
+USAGE
+    ;;
+esac

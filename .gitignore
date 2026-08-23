@@ -53,3 +53,8 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# ── Local runtime ──────────────────────────────────────────
+logs/
+data/backups/
+*.pid
