@@ -50,7 +50,7 @@ class AppSafetyTests(unittest.TestCase):
         response = self.client.get("/")
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Editorial Review Dashboard", page)
+        self.assertIn("Editorial Review", page)
         self.assertIn("command-center.css", page)
         self.assertIn("command-center.js", page)
         self.assertNotIn("approve_all", page)

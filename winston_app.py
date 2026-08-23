@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, url_for
 import json
 import os
 import re
@@ -996,6 +996,23 @@ def generate_csv() -> str:
 # ============================================================
 # ROUTES
 # ============================================================
+@app.context_processor
+def asset_version():
+    """Bust the browser cache when a static file actually changes.
+
+    Without this, editing the dashboard JS or CSS leaves the browser serving a
+    stale copy, which looks exactly like the change not working.
+    """
+    def versioned(filename: str) -> str:
+        path = os.path.join(app.static_folder or "static", filename)
+        try:
+            stamp = int(os.path.getmtime(path))
+        except OSError:
+            stamp = 0
+        return f"{url_for('static', filename=filename)}?v={stamp}"
+    return {"versioned": versioned}
+
+
 @app.route('/')
 def index():
     return render_template("dashboard.html")

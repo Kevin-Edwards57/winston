@@ -26,3 +26,67 @@
 .evidence-card a { font-size: 11px; color: #46c98a; text-decoration: none; }
 .evidence-card a:hover { text-decoration: underline; }
 .evidence-card .pill { align-self: flex-start; }
+
+/* ── Real views: tables, badges, banners ─────────────────────────────── */
+.view { display: block; }
+.view.hidden, .hidden { display: none !important; }
+
+.nav-divider { font-size: 10px; letter-spacing: .14em; color: #4d6373; padding: 16px 14px 6px; }
+
+.table-wrap { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th {
+  text-align: left; padding: 9px 12px; font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: #6f8695; border-bottom: 1px solid #17232d; white-space: nowrap;
+}
+.data-table td { padding: 10px 12px; border-bottom: 1px solid #111c24; color: #dce7ee; vertical-align: top; }
+.data-table tbody tr:hover { background: #0f1920; }
+.data-table td.muted { color: #7d94a4; }
+.data-table td.mono { font-family: 'Space Mono', monospace; color: #46c98a; }
+.data-table a { color: #46c98a; text-decoration: none; }
+.data-table a:hover { text-decoration: underline; }
+
+.badge {
+  display: inline-block; padding: 2px 8px; margin: 0 4px 3px 0; border-radius: 999px;
+  font-size: 10px; font-weight: 600; letter-spacing: .04em; white-space: nowrap;
+}
+.badge-ok { background: rgba(70,201,138,.14); color: #46c98a; }
+.badge-bad { background: rgba(255,107,107,.14); color: #ff6b6b; }
+.badge-warn { background: rgba(226,179,65,.14); color: #e2b341; }
+.badge-info { background: rgba(96,165,250,.14); color: #60a5fa; }
+.badge-muted { background: #16222b; color: #7d94a4; }
+
+.warning-banner, .ok-banner {
+  padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 10px; line-height: 1.5;
+}
+.warning-banner { background: rgba(226,179,65,.10); border: 1px solid rgba(226,179,65,.28); color: #e2b341; }
+.ok-banner { background: rgba(70,201,138,.08); border: 1px solid rgba(70,201,138,.22); color: #46c98a; }
+
+.section-heading {
+  margin: 22px 0 10px; font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: #6f8695;
+}
+
+.cost-strip { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.cost-box {
+  flex: 1 1 150px; padding: 14px 16px; border: 1px solid #17232d;
+  border-radius: 8px; background: #0d151b;
+}
+.cost-box small { display: block; font-size: 10px; letter-spacing: .1em;
+  text-transform: uppercase; color: #6f8695; margin-bottom: 6px; }
+.cost-box strong { font-size: 24px; color: #46c98a; font-family: 'Space Mono', monospace; }
+
+.ghost-button {
+  background: transparent; border: 1px solid #17232d; color: #7d94a4;
+  border-radius: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+}
+.ghost-button:hover:not(:disabled) { border-color: #46c98a; color: #46c98a; }
+.ghost-button:disabled { opacity: .5; cursor: default; }
+
+@media (max-width: 900px) { .data-table { font-size: 12px; } .cost-box strong { font-size: 20px; } }
+
+/* The Research control sits in a panel title sized for a text label, so it needs
+   its own room rather than being clipped by the header's original layout. */
+.intel-card .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.intel-card .panel-title .ghost-button { flex: 0 0 auto; white-space: nowrap; }
+.score-summary p { font-size: 11px; color: #6f8695; line-height: 1.5; margin-top: 8px; }

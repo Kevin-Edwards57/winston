@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='command-center.css') }}">
+  <link rel="stylesheet" href="{{ versioned('command-center.css') }}">
 </head>
 <body>
 <div class="app-shell">
@@ -21,7 +21,13 @@
       <button class="nav-item" data-view="leads"><span>♙</span>Leads</button>
       <button class="nav-item" data-view="sent"><span>✉</span>Sent History</button>
       <button class="nav-item" data-view="social"><span>◎</span>Social Leads</button>
+      <button class="nav-item" data-view="blocked"><span>⛌</span>Guardian Blocks <em id="nav-blocked-count">0</em></button>
       <button class="nav-item" data-view="activity"><span>◈</span>Activity</button>
+      <div class="nav-divider">OPERATIONS</div>
+      <button class="nav-item" data-view="pricing"><span>$</span>Pricing</button>
+      <button class="nav-item" data-view="catalog"><span>▦</span>Catalogue</button>
+      <button class="nav-item" data-view="providers"><span>◈</span>AI &amp; Cost</button>
+      <button class="nav-item" data-view="ops"><span>⚙</span>System</button>
     </nav>
     <div class="provider-card">
       <div class="card-kicker">AI MODE <span id="ai-mode">ZERO-COST</span></div>
@@ -52,9 +58,9 @@
       <article><span class="metric-icon green">◎</span><div><small>Social Leads</small><strong id="metric-social">—</strong><em>Manual outreach</em></div></article>
     </section>
 
-    <main class="content">
+    <main class="content" id="view-editorial">
       <div class="content-heading">
-        <div><h1>Editorial Review Dashboard</h1><p>Review, approve, queue, and explicitly confirm personalized outreach.</p></div>
+        <div><h1>Editorial Review</h1><p>Review, approve, queue, and explicitly confirm personalized outreach.</p></div>
         <div class="heading-actions"><span id="position-label">0 of 0</span><button id="prev-lead" title="Previous lead">‹</button><button id="next-lead" title="Next lead">›</button><button id="shortcuts-button">Keyboard Shortcuts</button></div>
       </div>
 
@@ -85,9 +91,9 @@
                 <div class="preview-body" id="preview-body"><span>W</span><h3>Website preview</h3><p>Open the business website in a new tab for review.</p></div>
               </div>
               <aside class="score-summary">
-                <small>Contact Completeness</small><strong><span id="completeness-score">0</span><em>/100</em></strong><div class="score-ring" id="score-ring"></div>
+                <small>Opportunity</small><strong><span id="completeness-score">0</span><em>/100</em></strong><div class="score-ring" id="score-ring"></div>
                 <dl><div><dt>Email</dt><dd id="has-email">—</dd></div><div><dt>Phone</dt><dd id="has-phone">—</dd></div><div><dt>Website</dt><dd id="has-website">—</dd></div></dl>
-                <p>This score reflects available contact fields only. Website opportunity scoring begins in Phase 5.</p>
+                <p id="score-note">Select a prospect.</p>
               </aside>
             </div>
             <div class="draft-editor" id="tab-outreach">
@@ -106,12 +112,49 @@
         </section>
 
         <aside class="intel-panel">
-          <section class="card intel-card"><div class="panel-title"><b>Lead Intelligence</b><span class="safe-label">FACTUAL</span></div><div id="intel-content" class="intel-empty">Select a lead to inspect verified contact data.</div></section>
+          <section class="card intel-card"><div class="panel-title"><b>Lead Intelligence</b><button class="ghost-button" id="research-button" title="Fetch and analyse this website">⟳ Research</button></div><div id="intel-content" class="intel-empty">Select a lead to inspect verified contact data.</div></section>
           <section class="card intel-card"><div class="panel-title"><b>History & Activity</b><span>LIVE</span></div><div class="event-list" id="activity-list"><div class="intel-empty">No activity yet.</div></div></section>
           <section class="card intel-card"><div class="panel-title"><b>Safety & Status</b></div><div class="safety-list"><p><i class="ok">✓</i> Explicit confirmation required</p><p><i class="ok">✓</i> Duplicate send locking active</p><p><i class="ok">✓</i> Suppression checked at send</p><p><i class="warn">!</i> Follow-ups disabled</p></div></section>
           <section class="card operation-card"><button class="primary" id="draft-existing-button">◇ Draft Existing (Free)</button><button class="paid-scan" id="scan-button" title="Uses Google Places API and may incur charges">▶ Google Scan $</button><button class="danger" id="stop-button">■ Stop</button></section>
         </aside>
       </div>
+    </main>
+
+    <!-- Real views. Previously these were toasts, scroll jumps, or raw JSON tabs. -->
+    <main class="content view hidden" id="view-sent">
+      <div class="content-heading"><div><h1>Sent History</h1><p>Every confirmed send, with what it offered and what came back.</p></div></div>
+      <section class="card"><div id="sent-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-social">
+      <div class="content-heading"><div><h1>Social Leads</h1><p>Businesses with a social presence and no email. Outreach is manual.</p></div></div>
+      <section class="card"><div id="social-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-blocked">
+      <div class="content-heading"><div><h1>Guardian Blocks</h1><p>Drafts Guardian refused. There is no bypass; a blocked draft is regenerated or abandoned.</p></div></div>
+      <section class="card"><div id="blocked-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-pricing">
+      <div class="content-heading"><div><h1>Pricing</h1><p>Commercial parameters and where each number came from.</p></div></div>
+      <div id="pricing-warning"></div>
+      <section class="card"><div id="pricing-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-catalog">
+      <div class="content-heading"><div><h1>YardLink Catalogue</h1><p>What YardLink sells, what merely proves capability, and what is internal.</p></div></div>
+      <section class="card"><div id="catalog-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-providers">
+      <div class="content-heading"><div><h1>AI &amp; Cost</h1><p>Which model handles what, and what it costs.</p></div></div>
+      <section class="card"><div id="providers-body"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-ops">
+      <div class="content-heading"><div><h1>System</h1><p>Winston&rsquo;s honest assessment of its own readiness.</p></div></div>
+      <section class="card"><div id="ops-body"><div class="intel-empty">Loading…</div></div></section>
     </main>
   </div>
 </div>
@@ -119,6 +162,6 @@
 <dialog id="shortcuts-dialog"><form method="dialog"><header><h2>Keyboard Shortcuts</h2><button>×</button></header><dl><div><dt>Next / previous lead</dt><dd><kbd>J</kbd> <kbd>K</kbd></dd></div><div><dt>Approve draft</dt><dd><kbd>A</kbd></dd></div><div><dt>Reject lead</dt><dd><kbd>R</kbd></dd></div><div><dt>Focus search</dt><dd><kbd>⌘</kbd> <kbd>K</kbd></dd></div><div><dt>Close dialog</dt><dd><kbd>Esc</kbd></dd></div></dl></form></dialog>
 <dialog id="confirm-dialog"><form method="dialog"><header><h2>Confirm Email Send</h2></header><p>This is the final human confirmation. Gmail will send this message immediately and the idempotency lock will prevent duplicate delivery.</p><div class="dialog-actions"><button value="cancel">Cancel</button><button value="confirm" class="confirm">Confirm & Send</button></div></form></dialog>
 <div class="toast" id="toast" role="status"></div>
-<script src="{{ url_for('static', filename='command-center.js') }}" defer></script>
+<script src="{{ versioned('command-center.js') }}" defer></script>
 </body>
 </html>

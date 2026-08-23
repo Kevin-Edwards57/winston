@@ -65,7 +65,7 @@ function selectLead(lead){
   $('lead-email').textContent=lead.email?`✉ ${lead.email}`:'✉ No email';$('lead-phone').textContent=lead.phone?`⌕ ${lead.phone}`:'⌕ No phone';
   const website=safeURL(lead.website);$('lead-site').textContent=website?lead.website:'No website';$('lead-site').href=website||'#';$('open-website').href=website||'#';$('open-website').classList.toggle('hidden',!website);$('preview-url').textContent=website||'No website found';
   $('draft-subject').value=lead.subject||'';$('draft-body').value=lead.draft||'';$('subject-count').textContent=$('draft-subject').value.length;$('body-count').textContent=$('draft-body').value.length;
-  const score=contactCompleteness(lead);$('completeness-score').textContent=score;$('score-ring').style.background=`conic-gradient(var(--green) ${score*3.6}deg,#17232d 0)`;
+  renderOpportunity(lead);
   $('has-email').textContent=yesNo(lead.email);$('has-phone').textContent=yesNo(lead.phone);$('has-website').textContent=yesNo(lead.website);renderIntel(lead);
   const current=stage(lead);$('approve-button').classList.toggle('hidden',current!=='draft');$('queue-button').classList.toggle('hidden',current!=='approved');$('confirm-button').classList.toggle('hidden',current!=='queued');
 }
@@ -190,21 +190,282 @@ function bind(){
   $('prev-lead').onclick=()=>move(-1);$('next-lead').onclick=()=>move(1);$('approve-button').onclick=approve;$('queue-button').onclick=queue;$('confirm-button').onclick=confirmSend;$('reject-button').onclick=()=>removeLead('reject');$('skip-button').onclick=()=>removeLead('skip');
   $('scan-button').onclick=startScan;$('draft-existing-button').onclick=draftExisting;$('empty-draft-existing').onclick=draftExisting;$('stop-button').onclick=stopScan;$('export-button').onclick=()=>location.href='/export_csv';$('shortcuts-button').onclick=()=>$('shortcuts-dialog').showModal();$('mobile-menu').onclick=()=>$('sidebar').classList.toggle('open');
   $('filter-toggle').onclick=()=>$('filters').classList.toggle('hidden');
+  const research=$('research-button');if(research)research.onclick=researchProspect;
   document.querySelectorAll('.nav-item').forEach(button=>button.onclick=()=>{
     const view=button.dataset.view,filter=button.dataset.filter;
-    if(button.id==='nav-live'){toast(state.dashboard?.scan_status==='drafting_existing'?'Local drafting is running.':state.dashboard?.scan_status==='scanning'?'Google discovery scan is running.':'No operation is currently running.')}
-    else if(filter==='no-website'){$('contact-filter').value='all';$('global-search').value='';$('queue-search').value='';state.filtered=state.leads.filter(lead=>!lead.website);renderQueue();selectLead(state.filtered[0]||null);toast(`${state.filtered.length} queued leads have no website.`)}
-    else if(view==='editorial'){$('queue-search').focus()}
-    else if(view==='overview'){window.scrollTo({top:0,behavior:'smooth'});toast('Live command-center metrics are shown above.')}
-    else if(view==='leads'){$('global-search').value='';$('queue-search').value='';$('status-filter').value='all';$('contact-filter').value='all';applyFilters();$('queue-search').focus()}
-    else if(view==='sent'){window.open('/sent?limit=100','_blank','noopener')}
-    else if(view==='social'){window.open('/social_leads?limit=100','_blank','noopener')}
-    else if(view==='activity'){$('activity-list').scrollIntoView({behavior:'smooth',block:'center'})}
-    document.querySelectorAll('.nav-item').forEach(item=>item.classList.remove('active'));button.classList.add('active');
+    if(button.id==='nav-live'){
+      const status=state.dashboard?.scan_status;
+      toast(status==='drafting_existing'?'Local drafting is running.':status==='scanning'?'Google discovery scan is running.':'No operation is currently running.');
+      return;
+    }
+    if(filter==='no-website'){
+      showView('editorial');
+      $('contact-filter').value='all';$('global-search').value='';$('queue-search').value='';
+      state.filtered=state.leads.filter(lead=>!lead.website);renderQueue();
+      selectLead(state.filtered[0]||null);
+      toast(`${state.filtered.length} queued leads have no website.`);
+      document.querySelectorAll('.nav-item').forEach(item=>item.classList.remove('active'));
+      button.classList.add('active');
+      return;
+    }
+    if(view==='leads'){
+      showView('editorial');
+      $('global-search').value='';$('queue-search').value='';
+      $('status-filter').value='all';$('contact-filter').value='all';applyFilters();
+      return;
+    }
+    if(view==='activity'){showView('editorial');$('activity-list').scrollIntoView({behavior:'smooth',block:'center'});return}
+    if(view==='overview'){showView('editorial');window.scrollTo({top:0,behavior:'smooth'});return}
+    showView(view);
   });
   document.querySelectorAll('.tabs button').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));button.classList.add('active');['overview','outreach','activity'].forEach(name=>$(`tab-${name}`).classList.toggle('hidden',button.dataset.tab!==name))});
   document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();$('global-search').focus();return}if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;const key=event.key.toLowerCase();if(key==='j')move(1);if(key==='k')move(-1);if(key==='a')approve();if(key==='r')removeLead('reject')});
 }
 
-async function boot(){bind();try{await Promise.all([loadDashboard(),loadLeads(false)]);setInterval(()=>{loadDashboard().catch(()=>{});loadLeads(true).catch(()=>{})},10000)}catch(error){toast(error.message,true);$('online-label').textContent='DEGRADED'}}
+window.addEventListener('hashchange',()=>showView(location.hash.slice(1)));
+
+async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{await Promise.all([loadDashboard(),loadLeads(false)]);setInterval(()=>{loadDashboard().catch(()=>{});loadLeads(true).catch(()=>{})},10000)}catch(error){toast(error.message,true);$('online-label').textContent='DEGRADED'}}
+
+
+/* ── Real views ───────────────────────────────────────────────────────────
+   The sidebar used to fake navigation: two items opened raw JSON in a new
+   tab, the rest fired toasts or scrolled. These are actual views over data
+   the backend already exposes. */
+
+const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','ops'];
+
+function showView(name){
+  if(!VIEWS.includes(name)) name='editorial';
+  VIEWS.forEach(view=>{const el=$(`view-${view}`);if(el)el.classList.toggle('hidden',view!==name)});
+  document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.view===name));
+  if(location.hash.slice(1)!==name) history.replaceState(null,'',`#${name}`);
+  const loader={sent:loadSent,social:loadSocial,blocked:loadBlocked,pricing:loadPricing,
+                catalog:loadCatalog,providers:loadProviders,ops:loadOps}[name];
+  if(loader) loader().catch(error=>toast(error.message,true));
+}
+
+function el(tag,className,text){const node=document.createElement(tag);if(className)node.className=className;if(text!=null)node.textContent=text;return node}
+function badge(text,tone){return el('span',`badge badge-${tone}`,text)}
+function money(value){return value==null?'—':`$${Number(value).toLocaleString(undefined,{maximumFractionDigits:0})}`}
+function dash(value){return value==null||value===''?'—':value}
+
+function table(root,columns,rows,renderRow,emptyMessage){
+  root.replaceChildren();
+  if(!rows.length){root.append(el('div','intel-empty',emptyMessage));return}
+  const t=el('table','data-table'),thead=el('thead'),tr=el('tr');
+  columns.forEach(c=>tr.append(el('th',null,c)));
+  thead.append(tr);t.append(thead);
+  const tbody=el('tbody');
+  rows.forEach(row=>tbody.append(renderRow(row)));
+  t.append(tbody);root.append(t);
+}
+
+/* Sent history. Previously window.open('/sent?limit=100'). */
+async function loadSent(){
+  const data=await api('/sent?limit=200');
+  const rows=(data.sent||[]).slice().reverse();
+  table($('sent-body'),['Business','Industry','Subject','Sent','Follow-up'],rows,item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,dash(item.name)));
+    tr.append(el('td','muted',dash(item.type)));
+    tr.append(el('td','muted',dash(item.subject)));
+    tr.append(el('td','muted',item.sent_date?new Date(item.sent_date).toLocaleDateString():'—'));
+    const status=el('td');status.append(item.followup_sent?badge('sent','ok'):badge('none','muted'));
+    tr.append(status);return tr;
+  },'No sends recorded yet.');
+}
+
+/* Social leads. Previously window.open('/social_leads?limit=100'). */
+async function loadSocial(){
+  const data=await api('/social_leads?limit=200');
+  const rows=data.leads||[];
+  table($('social-body'),['Business','Industry','Instagram','Facebook','Website'],rows,item=>{
+    const social=item.social||{};
+    const tr=el('tr');
+    tr.append(el('td',null,dash(item.name)));
+    tr.append(el('td','muted',dash(item.type)));
+    tr.append(el('td','muted',dash(social.instagram)));
+    tr.append(el('td','muted',dash(social.facebook)));
+    const site=el('td');
+    const url=safeURL(item.website);
+    if(url){const a=el('a',null,item.website);a.href=url;a.target='_blank';a.rel='noopener noreferrer';site.append(a)}
+    else site.textContent='—';
+    tr.append(site);return tr;
+  },'No social-only leads yet.');
+}
+
+/* Guardian blocks. There is deliberately no bypass control here. */
+async function loadBlocked(){
+  const data=await api('/drafts/blocked');
+  const rows=data.blocked||[];
+  $('nav-blocked-count').textContent=rows.length;
+  table($('blocked-body'),['Business','Status','Rules triggered','When'],rows,item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,dash(item.business)));
+    const status=el('td');status.append(badge(item.status,'bad'));tr.append(status);
+    const rules=el('td');
+    (item.issues||[]).forEach(rule=>rules.append(badge(rule.replaceAll('_',' '),'bad')));
+    if(!(item.issues||[]).length)rules.textContent='—';
+    tr.append(rules);
+    tr.append(el('td','muted',item.created_at?new Date(item.created_at).toLocaleString():'—'));
+    return tr;
+  },'Nothing blocked. Guardian has not refused any draft.');
+}
+
+/* Pricing. Every number states whether it is an assumption. */
+async function loadPricing(){
+  const [card,readiness]=await Promise.all([api('/ratecard'),api('/pricing')]);
+  const warn=$('pricing-warning');warn.replaceChildren();
+  if(card.status&&card.status.warning) warn.append(el('div','warning-banner',card.status.warning));
+  if(!readiness.can_quote) warn.append(el('div','warning-banner',`Cannot quote: ${readiness.missing.join('; ')}`));
+  const rate=readiness.rate_card&&readiness.rate_card.hourly_rate_usd;
+  warn.append(el('div','intel-note',rate?`Internal rate $${rate}/h. This is delivery cost, not the client price.`
+                                        :'No internal hourly rate configured.'));
+  table($('pricing-body'),['Service','Enabled','Floor','Target','Premium','Effort','Basis'],card.entries||[],item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,item.slug));
+    const on=el('td');on.append(item.enabled?badge('enabled','ok'):badge('disabled','muted'));tr.append(on);
+    tr.append(el('td','mono',money(item.price_floor_usd)));
+    tr.append(el('td','mono',money(item.price_target_usd)));
+    tr.append(el('td','mono',money(item.price_premium_usd)));
+    tr.append(el('td','muted',item.effort_hours_min?`${item.effort_hours_min}-${item.effort_hours_max}h`:'—'));
+    const basis=el('td');
+    basis.append(item.evidence_backed?badge('evidence','ok'):badge('assumption','warn'));
+    tr.append(basis);return tr;
+  },'No rate card entries.');
+}
+
+/* Catalogue. Sellable, proof, and internal must stay visibly distinct. */
+async function loadCatalog(){
+  const data=await api('/catalog');
+  const readiness=data.readiness||{};
+  const root=$('catalog-body');root.replaceChildren();
+  if(!readiness.can_recommend) root.append(el('div','warning-banner','No verified business-facing entry. Winston will not recommend anything.'));
+  const wrap=el('div');
+  table(wrap,['Entry','Kind','Status','Audience','Verified','Role'],data.entries||[],item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,item.name));
+    tr.append(el('td','muted',item.kind));
+    tr.append(el('td','muted',item.status));
+    tr.append(el('td','muted',item.audience));
+    const ver=el('td');ver.append(item.verified?badge('verified','ok'):badge('unverified','warn'));tr.append(ver);
+    const role=el('td');
+    if(item.offerable_to_business)role.append(badge('sellable','ok'));
+    else if(item.citable_as_proof)role.append(badge('proof only','info'));
+    else role.append(badge('not offerable','muted'));
+    tr.append(role);return tr;
+  },'Catalogue is empty.');
+  root.append(wrap);
+}
+
+/* AI and cost. The zero-cost architecture should be visible, not assumed. */
+async function loadProviders(){
+  const [summary,costs]=await Promise.all([api('/providers'),api('/costs')]);
+  const root=$('providers-body');root.replaceChildren();
+
+  const cost=el('div','cost-strip');
+  [['Today',costs.ai_cost.today_usd],['This month',costs.ai_cost.month_to_date_usd],
+   ['Projected',costs.ai_cost.projected_month_usd]].forEach(([label,value])=>{
+    const box=el('div','cost-box');box.append(el('small',null,label),el('strong',null,`$${Number(value).toFixed(2)}`));cost.append(box)});
+  root.append(cost);
+  if(!costs.spend_capable_providers.length)
+    root.append(el('div','ok-banner','No provider is currently able to spend money.'));
+
+  const avail=el('div');
+  table(avail,['Provider','Cost class','Usable','Suited to','Note'],summary.availability||[],item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,item.key));
+    tr.append(el('td','muted',item.cost_class));
+    const use=el('td');use.append(item.usable?badge('usable','ok'):badge('blocked','muted'));tr.append(use);
+    tr.append(el('td','muted',(item.suitable_for||[]).join(', ')));
+    tr.append(el('td','muted',item.blocked_reason||item.notes||''));
+    return tr;
+  },'No providers.');
+  root.append(el('h3','section-heading','Providers'),avail);
+
+  const routing=el('div');
+  const policy=summary.policy||{};
+  table(routing,['Task class','Preference order'],Object.keys(policy),name=>{
+    const tr=el('tr');tr.append(el('td',null,name));
+    tr.append(el('td','muted',(policy[name]||[]).join('  →  ')));return tr;
+  },'No routing policy.');
+  root.append(el('h3','section-heading','Routing policy'),routing);
+}
+
+/* System. Winston's own readiness, stated plainly. */
+async function loadOps(){
+  const health=await api('/health');
+  const root=$('ops-body');root.replaceChildren();
+
+  const warnings=[];
+  if(!health.catalogue?.can_recommend) warnings.push('No verified business-facing service. Winston cannot recommend anything.');
+  if(health.rate_card?.all_prices_are_assumptions) warnings.push('Every price is an operator assumption. No completed engagement supports any of them.');
+  if(!health.pricing?.can_quote) warnings.push(`Pricing cannot quote: ${(health.pricing?.missing||[]).join('; ')}`);
+  if(!health.funnel?.reply_tracking_enabled) warnings.push('Reply tracking has never run, so reply rates are unknown rather than zero.');
+  (health.misconfigured_providers||[]).forEach(item=>warnings.push(`${item.provider}: ${item.problem}`));
+  warnings.forEach(text=>root.append(el('div','warning-banner',text)));
+
+  if(health.dry_run) root.append(el('div','ok-banner','Dry run is ON. No message can reach a real inbox.'));
+  root.append(el('div','ok-banner',`Legacy follow-up sender: ${health.legacy_followup_sender}.`));
+
+  const counts=el('div');
+  table(counts,['Table','Rows'],Object.entries(health.counts||{}),([name,value])=>{
+    const tr=el('tr');tr.append(el('td',null,name.replaceAll('_',' ')));
+    tr.append(el('td','mono',String(value)));return tr;
+  },'No counts.');
+  root.append(el('h3','section-heading','Database'),counts);
+
+  const funnel=el('div');
+  const f=health.funnel||{};
+  table(funnel,['Stage','Value'],[
+    ['Sent',f.sent],['Delivered',f.delivery_tracked?f.delivered:'not tracked'],
+    ['Replies',f.reply_tracking_enabled?f.replies:'not tracked'],
+    ['Meetings',f.meetings],['Proposals',f.proposals],
+    ['Won',f.deals_won],['Revenue',money(f.revenue_usd)],
+    ['Reply rate',f.reply_rate==null?'unknown':`${(f.reply_rate*100).toFixed(1)}%`],
+  ],([label,value])=>{
+    const tr=el('tr');tr.append(el('td',null,label));
+    tr.append(el('td','mono',String(value)));return tr;
+  },'No funnel data.');
+  root.append(el('h3','section-heading','Commercial funnel'),funnel);
+}
+
+
+/* Opportunity replaces Contact Completeness. Having an email address is not an
+   opportunity, and a green 100 beside an unresearched business reads as an
+   endorsement Winston has not earned. */
+async function renderOpportunity(lead){
+  const label=$('completeness-score'),ring=$('score-ring');
+  if(!lead.contact_id){label.textContent='—';ring.style.background='#17232d';return}
+  label.textContent='…';
+  try{
+    const fit=await api(`/prospects/${encodeURIComponent(lead.contact_id)}/fit`);
+    const score=Math.round((fit.scores?.COMMERCIAL_OPPORTUNITY||0)*100);
+    const researched=(fit.observed_problems||[]).length>0;
+    label.textContent=researched?score:'—';
+    ring.style.background=researched?`conic-gradient(var(--green) ${score*3.6}deg,#17232d 0)`:'#17232d';
+    const note=$('score-note');
+    if(note) note.textContent=researched
+      ? `${fit.observed_problems.length} observed problem(s), confidence ${fit.scores.CONFIDENCE}`
+      : 'Not researched yet. Opportunity is unknown, not zero.';
+  }catch(error){label.textContent='—'}
+}
+
+/* Research from the interface rather than curl. */
+async function researchProspect(){
+  const lead=state.selected;
+  if(!lead?.contact_id){toast('Select a prospect first.',true);return}
+  const button=$('research-button');
+  if(button){button.disabled=true;button.textContent='Researching…'}
+  try{
+    const result=await api(`/research/${encodeURIComponent(lead.contact_id)}`,requestJSON('POST',{}));
+    toast(result.status==='ok'?`Found ${result.signals} signal(s) across ${result.pages} page(s).`
+                              :`Could not reach that site (${result.status}).`,result.status!=='ok');
+    renderOpportunity(lead);renderIntel(lead);
+  }catch(error){toast(error.message,true)}
+  finally{if(button){button.disabled=false;button.textContent='⟳ Research'}}
+}
+
+/* Start only once every declaration above has been evaluated. Invoking boot()
+   mid-file put it in the temporal dead zone of the view module's constants. */
 boot();
