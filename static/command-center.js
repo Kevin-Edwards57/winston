@@ -191,6 +191,11 @@ function bind(){
   $('scan-button').onclick=startScan;$('draft-existing-button').onclick=draftExisting;$('empty-draft-existing').onclick=draftExisting;$('stop-button').onclick=stopScan;$('export-button').onclick=()=>location.href='/export_csv';$('shortcuts-button').onclick=()=>$('shortcuts-dialog').showModal();$('mobile-menu').onclick=()=>$('sidebar').classList.toggle('open');
   $('filter-toggle').onclick=()=>$('filters').classList.toggle('hidden');
   const research=$('research-button');if(research)research.onclick=researchProspect;
+  document.querySelectorAll('[data-batch]').forEach(button=>
+    button.onclick=()=>startResearchBatch(Number(button.dataset.batch)));
+  const stop=$('research-stop');
+  if(stop)stop.onclick=async()=>{await api('/research/batch',{method:'DELETE'});toast('Stopping after the current prospect.');};
+  buildPalette();
   document.querySelectorAll('.nav-item').forEach(button=>button.onclick=()=>{
     const view=button.dataset.view,filter=button.dataset.filter;
     if(button.id==='nav-live'){
@@ -219,7 +224,7 @@ function bind(){
     showView(view);
   });
   document.querySelectorAll('.tabs button').forEach(button=>button.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));button.classList.add('active');['overview','outreach','activity'].forEach(name=>$(`tab-${name}`).classList.toggle('hidden',button.dataset.tab!==name))});
-  document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();$('global-search').focus();return}if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;const key=event.key.toLowerCase();if(key==='j')move(1);if(key==='k')move(-1);if(key==='a')approve();if(key==='r')removeLead('reject')});
+  document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();if(window.openPalette)window.openPalette();else $('global-search').focus();return}if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;const key=event.key.toLowerCase();if(key==='j')move(1);if(key==='k')move(-1);if(key==='a')approve();if(key==='r')removeLead('reject')});
 }
 
 window.addEventListener('hashchange',()=>showView(location.hash.slice(1)));
@@ -232,7 +237,7 @@ async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{a
    tab, the rest fired toasts or scrolled. These are actual views over data
    the backend already exposes. */
 
-const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','ops'];
+const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','research','agents','ops'];
 
 function showView(name){
   if(!VIEWS.includes(name)) name='editorial';
@@ -240,7 +245,8 @@ function showView(name){
   document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.view===name));
   if(location.hash.slice(1)!==name) history.replaceState(null,'',`#${name}`);
   const loader={sent:loadSent,social:loadSocial,blocked:loadBlocked,pricing:loadPricing,
-                catalog:loadCatalog,providers:loadProviders,ops:loadOps}[name];
+                catalog:loadCatalog,providers:loadProviders,research:loadResearch,
+                agents:loadAgents,ops:loadOps}[name];
   if(loader) loader().catch(error=>toast(error.message,true));
 }
 
@@ -468,4 +474,155 @@ async function researchProspect(){
 
 /* Start only once every declaration above has been evaluated. Invoking boot()
    mid-file put it in the temporal dead zone of the view module's constants. */
+
+/* ── Research batches ───────────────────────────────────────────────────
+   Bounded deliberately. Researching 1,390 prospects means 1,390 real requests
+   at small-business websites, so the operator picks a size and watches it. */
+
+async function loadResearch(){
+  const data=await api('/research/progress');
+  const status=$('research-status');status.replaceChildren();
+  const c=data.coverage||{};
+  status.append(el('div','warning-banner',
+    `${c.unresearched} of ${c.contacts} prospects have never been researched. Winston will not write about a business it has not looked at.`));
+
+  const root=$('research-progress');root.replaceChildren();
+  if(!data.requested){root.append(el('div','intel-empty','No batch has run yet.'));return}
+  const strip=el('div','cost-strip');
+  [['Requested',data.requested],['Researched',data.completed],
+   ['Unreachable',data.unreachable],['Failed',data.failed],
+   ['Signals found',data.signals]].forEach(([label,value])=>{
+    const box=el('div','cost-box');box.append(el('small',null,label),el('strong',null,String(value)));strip.append(box)});
+  root.append(strip);
+  root.append(el('div',data.running?'ok-banner':'intel-note',
+    data.running?'RUNNING. Progress updates every few seconds.':'Batch finished.'));
+}
+
+async function startResearchBatch(limit){
+  if(!confirm(`Research ${limit} prospects? This fetches ${limit} real websites, one at a time.`)) return;
+  try{
+    await api('/research/batch',requestJSON('POST',{limit}));
+    toast(`Research batch of ${limit} started.`);
+    pollResearch();
+  }catch(error){toast(error.message,true)}
+}
+
+let researchTimer=null;
+function pollResearch(){
+  clearInterval(researchTimer);
+  researchTimer=setInterval(async()=>{
+    try{
+      const data=await api('/research/progress');
+      await loadResearch();
+      if(!data.running){clearInterval(researchTimer);loadDashboard().catch(()=>{})}
+    }catch(error){clearInterval(researchTimer)}
+  },4000);
+}
+
+/* ── Agents ─────────────────────────────────────────────────────────────
+   Only what is genuinely implemented is listed as active. A function is not
+   an agent because it has a good name, and a dashboard implying otherwise
+   would be exactly the fake-agent theatre worth avoiding. */
+
+const AGENTS=[
+  {name:'Scout',status:'active',fn:'google_places_search',role:'Business discovery',
+   note:'Queries Google Places across categories and boroughs. Costs money, so it is opt-in.'},
+  {name:'Researcher',status:'active',fn:'research_contact',role:'Website and contact research',
+   note:'Fetches a site, follows contact pages, extracts email, phone and social.'},
+  {name:'Auditor',status:'active',fn:'extract_signals / derive_problems',role:'Digital-presence analysis',
+   note:'Deterministic. Withholds a negative when the page is client-rendered rather than guessing.'},
+  {name:'Strategist',status:'active',fn:'FitEngine.assess',role:'Offer matching',
+   note:'Scores product fit, service fit and proof relevance separately.'},
+  {name:'Pricer',status:'active',fn:'PricingEngine.quote',role:'Commercial pricing',
+   note:'Refuses without a rate card. Protected characteristics cannot reach it.'},
+  {name:'Writer',status:'active',fn:'Writer.write',role:'Outreach generation',
+   note:'Only states facts present in the brief. Declines when no verified offer fits.'},
+  {name:'Guardian',status:'active',fn:'Guardian.review',role:'Deterministic safety gate',
+   note:'Veto power. No bypass exists anywhere in the codebase.'},
+  {name:'Provider Router',status:'active',fn:'ProviderRegistry.route',role:'Model selection',
+   note:'Cheapest capable model first. Paid escalation needs two independent gates.'},
+  {name:'Inbox',status:'built, never run',fn:'InboxScanner.scan',role:'Reply classification',
+   note:'Implemented and unit tested, but has never run against a real mailbox.'},
+  {name:'Negotiator',status:'planned',fn:'—',role:'Reply handling and next action',
+   note:'Not implemented.'},
+  {name:'Learner',status:'blocked',fn:'—',role:'Outcome learning',
+   note:'Waiting on labelled outcomes. Zero replies, meetings or closed deals recorded.'},
+  {name:'ML Engine',status:'blocked',fn:'—',role:'Prediction',
+   note:'Insufficient data. Training on zero positive examples is not possible.'},
+];
+
+async function loadAgents(){
+  const root=$('agents-body');root.replaceChildren();
+  const active=AGENTS.filter(a=>a.status==='active').length;
+  root.append(el('div','ok-banner',
+    `${active} of ${AGENTS.length} roles are implemented and running. The rest are listed as planned or blocked rather than shown as active.`));
+  const wrap=el('div');
+  table(wrap,['Role','Status','Implementation','Responsibility','Notes'],AGENTS,item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,item.name));
+    const st=el('td');
+    st.append(badge(item.status,item.status==='active'?'ok':item.status==='blocked'?'muted':'warn'));
+    tr.append(st);
+    tr.append(el('td','mono',item.fn));
+    tr.append(el('td','muted',item.role));
+    tr.append(el('td','muted',item.note));
+    return tr;
+  },'No agents.');
+  root.append(wrap);
+}
+
+/* ── Command palette ────────────────────────────────────────────────────
+   Cmd/Ctrl+K used to focus a search box. It now opens a command list, so the
+   whole application is reachable without the mouse. */
+
+const COMMANDS=[
+  {label:'Go to Review queue', run:()=>showView('editorial')},
+  {label:'Go to Research', run:()=>showView('research')},
+  {label:'Go to Guardian blocks', run:()=>showView('blocked')},
+  {label:'Go to Pricing', run:()=>showView('pricing')},
+  {label:'Go to Catalogue', run:()=>showView('catalog')},
+  {label:'Go to AI and cost', run:()=>showView('providers')},
+  {label:'Go to Agents', run:()=>showView('agents')},
+  {label:'Go to Sent history', run:()=>showView('sent')},
+  {label:'Go to Social leads', run:()=>showView('social')},
+  {label:'Go to System', run:()=>showView('ops')},
+  {label:'Research this prospect', run:researchProspect},
+  {label:'Research batch of 10', run:()=>startResearchBatch(10)},
+  {label:'Research batch of 25', run:()=>startResearchBatch(25)},
+  {label:'Draft 10 existing contacts', run:draftExisting},
+  {label:'Export contacts as CSV', run:()=>location.href='/export_csv'},
+  {label:'Approve current draft', run:approve},
+];
+
+function buildPalette(){
+  if($('palette')) return;
+  const dialog=document.createElement('dialog');dialog.id='palette';dialog.className='palette';
+  const input=document.createElement('input');input.placeholder='Type a command…';input.id='palette-input';
+  const list=document.createElement('div');list.className='palette-list';list.id='palette-list';
+  dialog.append(input,list);document.body.append(dialog);
+
+  function render(filter=''){
+    const needle=filter.trim().toLowerCase();
+    const matches=COMMANDS.filter(c=>c.label.toLowerCase().includes(needle));
+    list.replaceChildren();
+    if(!matches.length){list.append(el('div','intel-empty','No matching command.'));return}
+    matches.forEach((command,index)=>{
+      const row=el('button','palette-item'+(index===0?' active':''),command.label);
+      row.onclick=()=>{dialog.close();command.run()};
+      list.append(row);
+    });
+  }
+  input.oninput=()=>render(input.value);
+  input.onkeydown=event=>{
+    if(event.key==='Enter'){
+      const first=list.querySelector('.palette-item');
+      if(first){dialog.close();first.click()}
+      event.preventDefault();
+    }
+  };
+  dialog.addEventListener('close',()=>{input.value=''});
+  window.openPalette=()=>{render();dialog.showModal();input.focus()};
+}
+
+/* Start only once every declaration above has been evaluated. */
 boot();

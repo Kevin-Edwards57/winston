@@ -27,6 +27,8 @@
       <button class="nav-item" data-view="pricing"><span>$</span>Pricing</button>
       <button class="nav-item" data-view="catalog"><span>▦</span>Catalogue</button>
       <button class="nav-item" data-view="providers"><span>◈</span>AI &amp; Cost</button>
+      <button class="nav-item" data-view="research"><span>⌕</span>Research</button>
+      <button class="nav-item" data-view="agents"><span>◉</span>Agents</button>
       <button class="nav-item" data-view="ops"><span>⚙</span>System</button>
     </nav>
     <div class="provider-card">
@@ -150,6 +152,28 @@
     <main class="content view hidden" id="view-providers">
       <div class="content-heading"><div><h1>AI &amp; Cost</h1><p>Which model handles what, and what it costs.</p></div></div>
       <section class="card"><div id="providers-body"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-research">
+      <div class="content-heading"><div><h1>Research</h1><p>Fetch and analyse prospect websites. Batches are bounded on purpose.</p></div></div>
+      <div id="research-status"></div>
+      <section class="card">
+        <h3 class="section-heading">Start a batch</h3>
+        <div class="batch-buttons">
+          <button class="ghost-button" data-batch="10">Research 10</button>
+          <button class="ghost-button" data-batch="25">Research 25</button>
+          <button class="ghost-button" data-batch="50">Research 50</button>
+          <button class="ghost-button" data-batch="100">Research 100</button>
+          <button class="danger" id="research-stop">Stop</button>
+        </div>
+        <p class="intel-note">Each prospect is a real small-business website, fetched once with a one second pause between them. A batch of 100 takes roughly five minutes.</p>
+      </section>
+      <section class="card"><h3 class="section-heading">Progress</h3><div id="research-progress"><div class="intel-empty">No batch has run yet.</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-agents">
+      <div class="content-heading"><div><h1>Agents</h1><p>What Winston actually runs. Roles in a pipeline, not autonomous personalities.</p></div></div>
+      <section class="card"><div id="agents-body"><div class="intel-empty">Loading…</div></div></section>
     </main>
 
     <main class="content view hidden" id="view-ops">

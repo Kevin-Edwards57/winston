@@ -230,6 +230,8 @@ state = {
     "pending":       [],
     "social_pending": [],  # NEW — leads with social but no email
     "existing_draft_progress": {"requested": 0, "completed": 0, "failed": 0},
+    "research_progress": {"requested": 0, "completed": 0, "failed": 0, "unreachable": 0,
+                          "signals": 0, "running": False, "started_at": None},
 }
 
 # ============================================================
@@ -1438,6 +1440,64 @@ def prospect_fit(contact_id):
         return jsonify(fit_engine.assess(contact_id).as_dict())
     except KeyError:
         return jsonify({"error": "Unknown contact"}), 404
+
+
+def run_bulk_research(limit: int) -> None:
+    """Research a bounded batch of unresearched prospects.
+
+    Bounded deliberately. 1,395 sequential site fetches is hours of wall clock and a
+    lot of traffic aimed at small businesses, so the operator picks a batch size and
+    watches it rather than starting something that cannot be reasoned about.
+    """
+    progress = state["research_progress"]
+    progress.update({"requested": limit, "completed": 0, "failed": 0, "unreachable": 0,
+                     "signals": 0, "running": True, "started_at": utc_now()})
+    try:
+        candidates = repository.unresearched_contacts(limit)
+        progress["requested"] = len(candidates)
+        log(f"Research batch started: {len(candidates)} prospects")
+        for contact in candidates:
+            if not progress["running"]:
+                log("Research batch stopped by operator")
+                break
+            result = research_contact(repository, signal_store, contact["id"], contact["website"])
+            if result["status"] == "ok":
+                progress["completed"] += 1
+                progress["signals"] += result.get("signals", 0)
+            elif result["status"] == "unreachable":
+                progress["unreachable"] += 1
+            else:
+                progress["failed"] += 1
+            time.sleep(1.0)   # deliberate pacing; these are real small-business sites
+        log(f"Research batch complete: {progress['completed']} researched, "
+            f"{progress['unreachable']} unreachable, {progress['failed']} failed")
+    finally:
+        progress["running"] = False
+
+
+@app.route('/research/batch', methods=['POST'])
+def research_batch():
+    """Start a bounded research batch."""
+    if state["research_progress"]["running"]:
+        return jsonify({"error": "A research batch is already running"}), 409
+    body = request.get_json(silent=True) or {}
+    limit = body.get("limit", 10)
+    if not isinstance(limit, int) or not 1 <= limit <= 200:
+        return jsonify({"error": "Batch size must be an integer from 1 to 200"}), 400
+    threading.Thread(target=run_bulk_research, args=(limit,), daemon=True).start()
+    return jsonify({"started": True, "limit": limit})
+
+
+@app.route('/research/batch', methods=['DELETE'])
+def research_batch_stop():
+    state["research_progress"]["running"] = False
+    return jsonify({"stopped": True})
+
+
+@app.route('/research/progress')
+def research_progress():
+    coverage = signal_store.coverage()
+    return jsonify({**state["research_progress"], "coverage": coverage})
 
 
 @app.route('/research/<contact_id>', methods=['POST'])

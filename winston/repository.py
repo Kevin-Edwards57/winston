@@ -588,6 +588,29 @@ class WinstonRepository:
             events.append(event)
         return events
 
+    def unresearched_contacts(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Contacts with a website and no successful research run.
+
+        Ordered by whether an email exists, because a prospect Winston cannot
+        contact is worth less than one it can, whatever its site turns out to say.
+        """
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT c.id, c.name, c.website, c.business_type
+                   FROM contacts c
+                   WHERE c.website != ''
+                     AND NOT EXISTS (
+                         SELECT 1 FROM research_runs r
+                         WHERE r.contact_id = c.id AND r.status = 'ok'
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM suppressions s
+                         WHERE s.normalized_email = c.normalized_email
+                     )
+                   ORDER BY (c.normalized_email = '') ASC, c.created_at
+                   LIMIT ?""", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def pending_drafts(self, limit: int = 500) -> list[dict[str, Any]]:
         """Drafts still awaiting human action, newest last.
 
