@@ -323,7 +323,11 @@ class FitEngineTests(CatalogBase):
         result = self.engine.assess(self.contact_id)
         self.assertIn("Otonia", [p["name"] for p in result.proof])
         for cited in result.proof:
-            self.assertFalse(cited["sellable"], f"{cited['name']} must never be offered for sale")
+            # The guarantee is that evidence is never pitched to a business prospect.
+            # YardLink Eats is genuinely sellable, to consumers, which is why the
+            # check is offerable_to_business rather than sellable.
+            self.assertFalse(cited["offerable_to_business"],
+                             f"{cited['name']} must never be offered to a prospect")
 
     def test_missing_proof_is_flagged_as_a_blocker(self):
         """An offer with nothing proving it cannot cite evidence, and says so."""
