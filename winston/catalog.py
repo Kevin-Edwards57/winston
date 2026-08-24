@@ -270,7 +270,7 @@ SEED_ENTRIES: tuple[dict[str, Any], ...] = (
 
     # The fulfilment engine behind the website service. A client buys the outcome
     # (a professional site, designed, written, and delivered), not the tool that
-    # produces it. Capabilities below are limited to what PRODUCTION.md marks DONE.
+    # produces it. Capabilities below are limited to what AUDIT.md verifies as built.
     {"slug": "website-builder", "name": "YardLink Studio Website Builder",
      "kind": "INTERNAL_TOOL", "status": "INTERNAL_TOOL", "audience": "business",
      "verified": 1,
@@ -279,18 +279,38 @@ SEED_ENTRIES: tuple[dict[str, Any], ...] = (
                     "The core path runs entirely on device with no backend.",
      "capabilities": ["structured client intake", "industry-aware site generation",
                       "live preview", "theme and layout system", "logo generation",
+                      "AI copywriting via local Ollama with deterministic fallback",
+                      "document extraction from PDF, DOCX and photo OCR",
+                      "browser image processing with IndexedDB asset persistence",
+                      "deterministic pre-publish auditor",
                       "standalone HTML export", "LocalBusiness JSON-LD",
-                      "OpenGraph and meta tags", "runs offline in the browser"],
-     "limitations": ["one-click publishing to a live URL is NOT built; the publish seam "
-                     "supports download only and cloud targets are Phase 4",
-                     "no Cloudflare or worker infrastructure exists in the repository",
+                      "OpenGraph and meta tags", "operator editing of every generated field",
+                      "client and project management",
+                      "publish state machine with a Cloudflare KV worker",
+                      "runs offline in the browser"],
+     "limitations": ["publishing is code-complete but NOT live by default: the operator must "
+                     "deploy publish-worker/ to their own Cloudflare account, create a KV "
+                     "namespace, and supply the worker URL and auth token",
+                     "industry awareness is bounded to exactly eight industries: Restaurant, "
+                     "Barber & Beauty, Church, Law Firm, Medical, Real Estate, Retail, Other. "
+                     "Anything else falls back to Other's generic structure. NEVER promise a "
+                     "bespoke section structure for an industry outside that list",
+                     "the section vocabulary is fixed: about, menu, gallery, team, accolades, "
+                     "cta, contact. Sections like 'services' or 'credentials' do not exist",
+                     "multi-page output is foundation only; single-page is the default",
+                     "AI copy requires a local Ollama model; without it, template fallback",
+                     "the model writes copy only and never emits HTML",
                      "Supabase persistence activates only when credentials are supplied",
                      "internal fulfilment platform, never sold to a client"],
      "deployment_model": "internal browser-based tool",
-     "notes": "Verified against PRODUCTION.md, which marks Phase 1 (local generation, "
-              "preview, HTML download) as done. Automatic publishing and cloud hosting "
-              "are later phases and must not be claimed. Cited as the reason YardLink can "
-              "deliver websites quickly; the commercial offer is website-service."},
+     "notes": "Verified against AUDIT.md and package.json on 2026-08-23. The production "
+              "path (8-step intake, generation, preview, standalone HTML download) is "
+              "done. Publishing infrastructure EXISTS -- a real Cloudflare KV worker in "
+              "publish-worker/ -- but is operator-configured, so a live client URL must "
+              "not be promised as turnkey. This is the fulfilment engine behind the "
+              "website service: it is why YardLink can produce a first version in hours "
+              "rather than days, across many clients, without hand-coding each site. "
+              "The client buys the outcome; the commercial offer is website-service."},
 
     {"slug": "errol", "name": "Errol", "kind": "INTERNAL_TOOL",
      "status": "INTERNAL_TOOL", "audience": "consumer", "verified": 1,

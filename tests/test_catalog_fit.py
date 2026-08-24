@@ -180,17 +180,46 @@ class FulfilmentPlatformTests(CatalogBase):
         self.assertIn("website-builder",
                       [p["slug"] for p in self.catalog.proof_for("website-service")])
 
-    def test_unbuilt_publishing_is_recorded_as_a_limitation(self):
-        """PRODUCTION.md marks cloud publishing as Phase 4; download only today."""
+    def test_publishing_is_recorded_as_not_turnkey(self):
+        """The Cloudflare worker exists, but the operator must deploy it themselves.
+
+        This test previously asserted publishing was "not built". That became false when
+        publish-worker/ landed. The invariant worth keeping is not "no publishing" but
+        "no turnkey publishing": Winston must never imply a client gets a live URL as
+        part of the service without the operator standing up their own Cloudflare account.
+        """
         limitations = " ".join(self.catalog.get("website-builder")["limitations"]).casefold()
         self.assertIn("publishing", limitations)
-        self.assertIn("not built", limitations)
+        self.assertIn("not live by default", limitations)
+        self.assertIn("operator must", limitations)
+        self.assertIn("kv namespace", limitations)
 
-    def test_builder_capabilities_exclude_publishing(self):
+    def test_builder_capabilities_do_not_claim_turnkey_deployment(self):
+        """Naming the publish subsystem is honest; calling it managed hosting is not."""
         capabilities = " ".join(self.catalog.get("website-builder")["capabilities"]).casefold()
-        self.assertNotIn("publish", capabilities)
-        self.assertNotIn("cloudflare", capabilities)
         self.assertIn("standalone html export", capabilities)
+        for forbidden in ("turnkey", "managed hosting", "one-click publish", "we host"):
+            self.assertNotIn(forbidden, capabilities)
+
+    def test_industry_support_is_bounded_to_the_eight_that_exist(self):
+        """lib/site-generator.ts defines exactly eight. Everything else falls to Other.
+
+        Without this bound Winston would pitch, say, a security firm a bespoke structure
+        the Builder cannot produce -- and Guardian would pass it, because Guardian checks
+        claims against this catalogue.
+        """
+        limitations = " ".join(self.catalog.get("website-builder")["limitations"]).casefold()
+        for industry in ("restaurant", "barber & beauty", "church", "law firm",
+                         "medical", "real estate", "retail", "other"):
+            self.assertIn(industry, limitations)
+        self.assertIn("never promise a bespoke section structure", limitations)
+
+    def test_section_vocabulary_is_bounded_to_the_seven_that_exist(self):
+        """INDUSTRY_SECTIONS emits only these seven section keys."""
+        limitations = " ".join(self.catalog.get("website-builder")["limitations"]).casefold()
+        for section in ("about", "menu", "gallery", "team", "accolades", "cta", "contact"):
+            self.assertIn(section, limitations)
+        self.assertIn("'services' or 'credentials' do not exist", limitations)
 
 
 class CatalogEditingTests(CatalogBase):
