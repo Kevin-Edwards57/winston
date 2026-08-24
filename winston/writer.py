@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .catalog import Catalog
-from .fit import FitEngine, FitResult
+from .fit import FitEngine, FitResult, select_proof
 from .pricing import NoPricingBasis, PricingEngine
 from .repository import WinstonRepository, utc_now
 from .signals import SignalStore
@@ -119,100 +119,6 @@ def strip_em_dashes(text: str) -> str:
     text = re.sub(r"\s*—\s*", ", ", text)
     text = re.sub(r"\s*–\s*(?=\D)", ", ", text)
     return re.sub(r",\s*,", ",", text)
-
-
-def score_proof(entry: dict[str, Any], *, industry: str, offer: dict[str, Any],
-                problem_codes: set[str], explicitly_linked: bool = False) -> tuple[float, list[str]]:
-    """Relevance of one piece of evidence to this specific opportunity.
-
-    Deliberately general. Nothing here privileges a particular project; YardLink Eats
-    outranks Anansi for a restaurant because it carries that industry in its strategic
-    segments, not because it is named in a special case. A data-engineering prospect
-    would invert the ordering through the same arithmetic.
-    """
-    if not entry.get("verified"):
-        return 0.0, ["unverified, cannot be cited"]
-
-    score, reasons = 0.0, []
-    # A curated `proves` link is a human asserting relevance. Without this baseline a
-    # website offer scored zero proof, because no portfolio entry happens to contain
-    # the literal word "website" even though three were deliberately linked to it.
-    if explicitly_linked:
-        score += 0.3
-        reasons.append("linked as proof for this offer")
-
-    segments = {str(s).casefold() for s in (entry.get("strategic_segments") or [])}
-    industries = {str(s).casefold() for s in (entry.get("industries") or [])}
-    capabilities = {str(c).casefold() for c in (entry.get("capabilities") or [])}
-    blob = " ".join(capabilities | {str(entry.get("description", "")).casefold()})
-
-    # Standing in the prospect's own industry is the strongest signal a prospect
-    # can personally recognise.
-    if industry and industry in segments:
-        score += 0.5
-        reasons.append(f"already active in the {industry} market")
-    elif industry and industry in industries:
-        score += 0.35
-        reasons.append(f"built for {industry} businesses")
-    elif industry:
-        head = industry.split()[-1] if industry.split() else ""
-        if head and any(head in seg for seg in segments | industries):
-            score += 0.2
-            reasons.append(f"adjacent to the {industry} market")
-
-    # Capability overlap with what is actually being offered.
-    offer_terms = {str(t).casefold() for t in (offer.get("capabilities") or [])}
-    offer_terms |= {w for w in str(offer.get("name", "")).casefold().split() if len(w) > 3}
-    overlap = [term for term in offer_terms if term and term in blob]
-    if overlap:
-        score += min(0.3, 0.1 * len(overlap))
-        reasons.append(f"demonstrates {overlap[0]}")
-
-    # Evidence that speaks to the observed problem domain.
-    problem_words = {word for code in problem_codes for word in code.split("_") if len(word) > 3}
-    if any(word in blob for word in problem_words):
-        score += 0.15
-        reasons.append("addresses the same problem area")
-
-    return round(min(score, 1.0), 3), reasons
-
-
-def select_proof(catalog: Catalog, offer: dict[str, Any], industry: str,
-                 problem_codes: set[str] | None = None,
-                 limit: int = MAX_PROOF) -> list[dict[str, Any]]:
-    """Rank every citable entry by relevance and return the strongest.
-
-    An earlier version appended linked proof in database order, which put Anansi
-    ahead of YardLink Eats for a restaurant purely because of insertion sequence.
-    """
-    offer_slug = offer.get("slug", "")
-    problem_codes = problem_codes or set()
-
-    candidates: dict[str, dict[str, Any]] = {}
-    for entry in catalog.proof_for(offer_slug):
-        candidates[entry["slug"]] = entry
-    for entry in catalog.strategic_proof_for(industry):
-        candidates.setdefault(entry["slug"], entry)
-
-    linked = {e["slug"] for e in catalog.proof_for(offer_slug)}
-    ranked = []
-    for entry in candidates.values():
-        score, reasons = score_proof(entry, industry=industry, offer=offer,
-                                     problem_codes=problem_codes,
-                                     explicitly_linked=entry["slug"] in linked)
-        if score <= 0:
-            continue
-        ranked.append({
-            "slug": entry["slug"], "name": entry["name"],
-            "description": entry.get("description", ""),
-            "url": entry.get("url", ""), "kind": entry["kind"],
-            "relevance": score,
-            "why": reasons[0] if reasons else "related capability",
-            "reasons": reasons,
-        })
-
-    ranked.sort(key=lambda r: -r["relevance"])
-    return ranked[:limit]
 
 
 def rank_problems(problems: list[Any], offer: dict[str, Any]) -> list[Any]:
