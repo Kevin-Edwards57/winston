@@ -234,3 +234,80 @@ commercial    do not pitch unless absence is confirmed
 A detector that cannot distinguish "I did not see it" from "it is not there" will
 generate revenue-shaped noise. The fix was not a better analytics scanner. It was
 refusing to let an inference cross into a sales claim.
+
+---
+
+# Generalising the lesson: commercial assertability
+
+The measurement fix corrected one detector. The same failure shape applied to every
+problem derived from something not being found, so assertability became a property of
+every problem rather than a special case.
+
+## Three states, one gate
+
+| State | Meaning | Enters a sales brief |
+|---|---|---|
+| `confirmed` | Observed directly. The marker would be present if the claim were true. | yes, above 0.7 confidence |
+| `inferred` | Derived from absence, and something could be hiding the thing. | **no** |
+| `unknown` | Research insufficient. | no |
+
+An inferred problem is still recorded, still shown to a reviewer, and still explains its
+limitations. It simply cannot become something Winston states to a business as fact.
+
+Capability gaps are inferred by construction. A booking widget can sit behind a phone
+link, on a page that was not fetched, or inside a client-rendered app.
+
+## What this did to the numbers
+
+Across the same 43 reachable prospects:
+
+| | Before gate | After gate |
+|---|---|---|
+| Offer match | 34/50 | **26/50** |
+| booking-systems matches | 15 | **1** |
+| website-service matches | 19 | 25 |
+
+Eight prospects were matched entirely on inferred evidence.
+
+## Problem classification, 59 researched prospects
+
+| Problem | Assertable | Inferred |
+|---|---|---|
+| `weak_seo_basics` | **22** | 0 |
+| `no_lead_capture` | **20** | 0 |
+| `no_measurement` | 2 | 20 |
+| `no_ssl` | **1** | 0 |
+| `no_online_booking` | **0** | 19 |
+| `no_online_ordering` | **0** | 15 |
+| `outdated_website` | **0** | 8 |
+
+Every problem Winston can assert is one it read directly in the markup: a missing `h1`,
+a missing form, an insecure scheme. Every problem derived from absence is inferred.
+
+## This reverses an earlier recommendation
+
+The previous conclusion was that `booking-systems` was the strongest opportunity, on 15
+matches. **All 15 rested on inferred evidence.** On assertable evidence booking has
+demand of zero, and the real evidence-backed demand is:
+
+| Service | Assertable demand | Inferred demand |
+|---|---|---|
+| website-service / web-development / landing-pages | **42** | 8 |
+| lead-capture-systems / website-redesign | **22** | 8 to 20 |
+| marketing-automation | 2 | 20 |
+| **booking-systems** | **0** | 19 |
+| **ordering-systems** | **0** | 15 |
+
+`GET /intelligence/offers` reports this continuously.
+
+## The open question this raises
+
+An inferred problem is not worthless. "We could not find a way to book online" is a
+reasonable thing to *ask* a business, and an unreasonable thing to *assert*. Winston
+currently discards inferred problems at the brief boundary, which is safe and possibly
+too blunt. A future outreach mode could open with a question rather than a claim, and
+that would be a different Writer contract rather than a loosening of this gate.
+
+Until that exists, the honest position is that Winston has strong evidence for website
+structure and lead capture, and no assertable evidence for booking or ordering demand at
+all.

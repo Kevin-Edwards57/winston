@@ -94,14 +94,18 @@ class CommercialRuleTests(unittest.TestCase):
             '<html><head><script src="https://static.parastorage.com/x.js"></script></head><body><div id="SITE_CONTAINER"></div></body></html>',
         ):
             with self.subTest(html=html[:50]):
-                codes = {p.code for p in derive_problems(signals_dict(html), industry="florist")}
-                self.assertNotIn("no_measurement", codes,
-                                 "an unseen tag was turned into a sales opportunity")
+                problems = {p.code: p for p in derive_problems(signals_dict(html), industry="florist")}
+                measurement = problems.get("no_measurement")
+                # It may be recorded for the reviewer, but never stated to a prospect.
+                if measurement:
+                    self.assertFalse(measurement.commercially_assertable,
+                                     "an unseen tag became a sales claim")
 
-    def test_confirmed_absence_does_become_a_problem(self):
+    def test_confirmed_absence_does_become_an_assertable_problem(self):
         signals = signals_dict('<html><head><title>Old</title></head><body><p>Call</p></body></html>')
-        codes = {p.code for p in derive_problems(signals, industry="florist")}
-        self.assertIn("no_measurement", codes)
+        problems = {p.code: p for p in derive_problems(signals, industry="florist")}
+        self.assertIn("no_measurement", problems)
+        self.assertTrue(problems["no_measurement"].commercially_assertable)
 
     def test_detected_never_becomes_a_problem(self):
         signals = signals_dict('<html><head><script src="https://www.googletagmanager.com/gtag/js?id=G-A">'

@@ -18,6 +18,9 @@ from winston.repository import WinstonRepository
 from winston.signals import SignalStore, extract_signals
 from winston.writer import Writer, select_proof, strip_em_dashes
 
+# Problems here are observed directly in the markup: no h1, no form, no meta
+# description. Capability gaps such as missing ordering are inferred and therefore
+# gated out of the sales brief, so a fixture relying on them would produce no draft.
 STALE_RESTAURANT = """<html><head><title>Irie Jerk</title></head><body>
 <table><tr><td>Menu</td></tr></table><p>Call to order</p>
 <p>Copyright 2013</p></body></html>"""
@@ -44,8 +47,9 @@ class PhaseABase(unittest.TestCase):
 
         self.ai = MagicMock()
         self.ai.generate.return_value = MagicMock(
-            text="Your site has no online ordering. That costs you orders. "
-                 "YardLink builds ordering systems. Would that be useful?",
+            text="Your site has no main heading and no enquiry form. People who find "
+                 "you cannot easily get in touch. YardLink builds sites with proper "
+                 "structure and lead capture. Would that be useful?",
             provider="ollama", model="qwen3:8b", input_tokens=10,
             output_tokens=20, estimated_cost_usd=0.0)
         self.writer = Writer(self.repo, self.catalog, self.signals, self.fit, self.ai)
@@ -64,7 +68,7 @@ class PhaseABase(unittest.TestCase):
         self.signals.complete_run(run, status="ok", pages=1, signals=9)
 
     def _verify_ordering(self):
-        self.catalog.verify("ordering-systems", actor="test")
+        self.catalog.verify("website-service", actor="test")
 
     def _contact(self):
         return dict(self.repo.connect().execute(
@@ -84,7 +88,7 @@ class WriterTests(PhaseABase):
         self._verify_ordering()
         brief = self.writer.build_brief(self.contact_id)
         codes = {p["code"] for p in brief["observed_problems"]}
-        self.assertIn("no_online_ordering", codes)
+        self.assertIn("weak_seo_basics", codes)
         self.assertTrue(all(p["evidence"] for p in brief["observed_problems"]))
 
     def test_writer_leads_with_the_intent_problem(self):
@@ -92,14 +96,15 @@ class WriterTests(PhaseABase):
         self._research()
         self._verify_ordering()
         brief = self.writer.build_brief(self.contact_id)
-        self.assertEqual(brief["intent"], "ordering opportunity")
-        self.assertEqual(brief["observed_problems"][0]["code"], "no_online_ordering")
+        self.assertIn(brief["intent"], {"lead capture opportunity", "SEO opportunity",
+                                        "website opportunity"})
+        self.assertTrue(brief["observed_problems"][0]["commercially_assertable"])
 
     def test_writer_uses_catalogue(self):
         self._research()
         self._verify_ordering()
         brief = self.writer.build_brief(self.contact_id)
-        self.assertEqual(brief["recommended_service"]["slug"], "ordering-systems")
+        self.assertEqual(brief["recommended_service"]["slug"], "website-service")
 
     def test_writer_uses_portfolio_proof(self):
         self._research()
@@ -140,7 +145,7 @@ class WriterTests(PhaseABase):
         self.signals.complete_run(run, status="ok", pages=1, signals=9)
         self._verify_ordering()
         codes = {p["code"] for p in self.writer.build_brief(self.contact_id)["observed_problems"]}
-        self.assertNotIn("no_online_ordering", codes, "Toast ordering was detected")
+        self.assertNotIn("weak_seo_basics", codes, "Toast ordering was detected")
         self.assertNotIn("not_mobile_friendly", codes)
 
     def test_writer_prompt_contains_only_briefed_facts(self):
@@ -165,9 +170,9 @@ class WriterTests(PhaseABase):
 
     def test_proof_selection_is_limited(self):
         self._verify_ordering()
-        offer = self.catalog.get("ordering-systems")
+        offer = self.catalog.get("website-service")
         proof = select_proof(self.catalog, offer, "jamaican restaurant",
-                             {"no_online_ordering"})
+                             {"weak_seo_basics"})
         self.assertLessEqual(len(proof), 2, "an email must not become a portfolio dump")
         self.assertEqual(proof[0]["slug"], "yardlink-eats",
                          "industry standing must rank first")
@@ -189,26 +194,26 @@ class GuardianStyleTests(PhaseABase):
         self._verify_ordering()
 
     def test_guardian_blocks_em_dash(self):
-        result = self._review("Your site has no online ordering — that costs you orders.")
+        result = self._review("Your site has no enquiry form — visitors cannot get in touch.")
         self.assertFalse(result.approved)
         self.assertIn("no_em_dash", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_banned_filler(self):
-        result = self._review("I hope this email finds you well. Your site has no online ordering.")
+        result = self._review("I hope this email finds you well. Your site has no enquiry form.")
         self.assertFalse(result.approved)
         self.assertIn("banned_phrase", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_overlong_draft(self):
-        result = self._review("Your site has no online ordering. " * 60)
+        result = self._review("Your site has no enquiry form. " * 60)
         self.assertFalse(result.approved)
         self.assertIn("too_long", [i["rule"] for i in result.issues])
 
     def test_guardian_allows_a_clean_draft(self):
         result = self._review(
-            "I noticed your site has no online ordering, so customers have to call to "
-            "place an order. YardLink builds ordering systems that let people order "
-            "directly from the site. Our YardLink Eats app already works with Jamaican "
-            "restaurants across New York. Would it help to see what that could look like?")
+            "I noticed your site has no enquiry form, so anyone who finds you has to "
+            "pick up the phone. YardLink builds sites with lead capture built in. Our "
+            "YardLink Eats app already works with Caribbean restaurants across New York. "
+            "Would it help to see what that could look like?")
         self.assertTrue(result.approved, f"unexpected issues: {result.issues}")
 
 
@@ -228,19 +233,19 @@ class GuardianClaimTests(PhaseABase):
 
     def test_guardian_blocks_invented_statistics(self):
         result = self._review(
-            "Your site has no online ordering. Restaurants see 40% more orders with "
-            "digital ordering. Would that help?")
+            "Your site has no enquiry form. Businesses see 40% more leads with one. "
+            "Would that help?")
         self.assertFalse(result.approved)
         self.assertIn("unsupported_claim", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_guarantees(self):
         result = self._review(
-            "Your site has no online ordering. We guarantee more orders. Interested?")
+            "Your site has no enquiry form. We guarantee more leads. Interested?")
         self.assertFalse(result.approved)
 
     def test_guardian_blocks_named_client_claims(self):
         result = self._review(
-            "Your site has no online ordering. We built an ordering system for "
+            "Your site has no enquiry form. We built a lead capture system for "
             "Golden Krust. Would that help you?")
         self.assertFalse(result.approved)
         self.assertIn("named_client", [i["rule"] for i in result.issues])
@@ -262,46 +267,46 @@ class GuardianCommercialTests(PhaseABase):
     def test_guardian_blocks_pitching_a_consumer_product(self):
         """YardLink Eats is verified and shipping, but restaurants do not buy it."""
         result = self._review(
-            "Your site has no online ordering. You should buy YardLink Eats to fix it. "
+            "Your site has no enquiry form. You should buy YardLink Eats to fix it. "
             "Would that work?")
         self.assertFalse(result.approved)
         self.assertIn("not_offerable", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_pitching_a_portfolio_project(self):
         result = self._review(
-            "Your site has no online ordering. You can purchase Otonia from us. Interested?")
+            "Your site has no enquiry form. You can purchase Otonia from us. Interested?")
         self.assertFalse(result.approved)
 
     def test_guardian_blocks_unverified_entry(self):
         """GuardLink is unverified, so it may not appear in outreach at all."""
         result = self._review(
-            "Your site has no online ordering. GuardLink could help you. Interested?")
+            "Your site has no enquiry form. GuardLink could help you. Interested?")
         self.assertFalse(result.approved)
         self.assertIn("unverified_entry", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_offering_a_coming_soon_product(self):
         """WedLink is verified but COMING_SOON, so it cannot be positioned as the answer."""
         result = self._review(
-            "Your site has no online ordering. WedLink could help you. Interested?")
+            "Your site has no enquiry form. WedLink could help you. Interested?")
         self.assertFalse(result.approved)
 
     def test_guardian_allows_citing_a_consumer_product_as_proof(self):
         result = self._review(
-            "I noticed your site has no online ordering. YardLink builds ordering "
-            "systems. Our YardLink Eats app already works with Jamaican restaurants "
-            "across New York. Would it help to see what that looks like?")
+            "I noticed your site has no enquiry form. YardLink builds sites with "
+            "lead capture. Our YardLink Eats app already works with Caribbean "
+            "restaurants across New York. Would it help to see what that looks like?")
         self.assertTrue(result.approved, f"unexpected issues: {result.issues}")
 
     def test_guardian_blocks_protected_characteristic_pricing(self):
         result = self._review(
-            "Your site has no online ordering. We offer a discount because you are "
+            "Your site has no enquiry form. We offer a discount because you are "
             "a minority-owned business. Interested?")
         self.assertFalse(result.approved)
         self.assertIn("protected_characteristic", [i["rule"] for i in result.issues])
 
     def test_guardian_blocks_ethnicity_based_pricing(self):
         result = self._review(
-            "Your site has no online ordering. Given your nationality we can lower the "
+            "Your site has no enquiry form. Given your nationality we can lower the "
             "price for you. Interested?")
         self.assertFalse(result.approved)
 
@@ -315,30 +320,30 @@ class GuardianFulfilmentTests(PhaseABase):
         self._verify_ordering()
 
     def test_blocks_automatic_publishing_claim(self):
-        result = self._review("Your site has no online ordering. We build it and "
+        result = self._review("Your site has no enquiry form. We build it and "
                               "one-click publish it live. Interested?")
         self.assertFalse(result.approved)
         self.assertIn("unsupported_fulfilment", [i["rule"] for i in result.issues])
 
     def test_blocks_guaranteed_seo_or_leads(self):
         for claim in ("We guarantee more leads.", "We guarantee top SEO rankings."):
-            result = self._review(f"Your site has no online ordering. {claim} Interested?")
+            result = self._review(f"Your site has no enquiry form. {claim} Interested?")
             self.assertFalse(result.approved, claim)
 
     def test_blocks_unlimited_scope(self):
-        result = self._review("Your site has no online ordering. Unlimited revisions "
+        result = self._review("Your site has no enquiry form. Unlimited revisions "
                               "included. Interested?")
         self.assertFalse(result.approved)
 
     def test_blocks_invented_delivery_times(self):
-        result = self._review("Your site has no online ordering. We deliver in just "
+        result = self._review("Your site has no enquiry form. We deliver in just "
                               "3 days. Interested?")
         self.assertFalse(result.approved)
 
     def test_allows_an_honest_offer(self):
         result = self._review(
-            "I noticed your site has no online ordering, so customers have to call. "
-            "YardLink builds ordering systems that let people order from the site. "
+            "I noticed your site has no enquiry form, so customers have to call. "
+            "YardLink builds sites with lead capture built in. "
             "Would it help to see what that could look like?")
         self.assertTrue(result.approved, f"unexpected: {result.issues}")
 
@@ -348,8 +353,8 @@ class GuardianSafetyTests(PhaseABase):
         super().setUp()
         self._research()
         self._verify_ordering()
-        self.clean = ("I noticed your site has no online ordering, so customers have to "
-                      "call. YardLink builds ordering systems. Would that be useful?")
+        self.clean = ("I noticed your site has no enquiry form, so customers have to "
+                      "call. YardLink builds lead capture into the site. Would that be useful?")
 
     def test_guardian_blocks_suppressed_recipient(self):
         self.repo.suppress("irie@example.com", "unsubscribed")

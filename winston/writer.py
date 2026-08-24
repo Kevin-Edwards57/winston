@@ -174,8 +174,13 @@ class Writer:
         signals = self.signals.for_contact(contact_id)
 
         # Only observations strong enough to assert. Weak ones are dropped, not hedged.
-        usable = [p for p in assessment.problems if p.confidence >= self.confidence_floor]
-        withheld = [p.code for p in assessment.problems if p.confidence < self.confidence_floor]
+        # Only commercially assertable problems reach the brief. An inferred problem
+        # is real research worth showing a reviewer, but it is not something Winston
+        # will state to a business as fact.
+        usable = [p for p in assessment.assertable_problems
+                  if p.confidence >= self.confidence_floor]
+        withheld = [f"{p.code} ({p.assertability})" for p in assessment.problems
+                    if p not in usable]
 
         offer = assessment.recommended_service or assessment.recommended_product
 

@@ -1478,6 +1478,51 @@ def run_bulk_research(limit: int) -> None:
         progress["running"] = False
 
 
+@app.route('/intelligence/offers')
+def offer_intelligence():
+    """Which services have evidence-backed demand, separated from inferred demand.
+
+    Built after an experiment where booking-systems appeared to be the strongest
+    opportunity on 15 matches, all of which rested on a problem derived from
+    absence rather than observation.
+    """
+    from winston.fit import derive_problems
+    rows = repository.connect().execute(
+        """SELECT c.id,c.business_type FROM contacts c
+           JOIN research_runs r ON r.contact_id=c.id AND r.status='ok'
+           GROUP BY c.id""").fetchall()
+
+    assertable, inferred = {}, {}
+    for row in rows:
+        signals = signal_store.for_contact(row["id"])
+        for problem in derive_problems(signals, industry=(row["business_type"] or "").casefold()):
+            bucket = assertable if problem.commercially_assertable else inferred
+            bucket[problem.code] = bucket.get(problem.code, 0) + 1
+
+    services = []
+    for entry in catalog.list(kind="SERVICE"):
+        solves = {str(s).casefold().replace(" ", "_") for s in (entry.get("problems_solved") or [])}
+        rate = rate_card.get(entry["slug"])
+        services.append({
+            "slug": entry["slug"], "name": entry["name"],
+            "verified": entry["verified"], "offerable": entry["offerable_to_business"],
+            "enabled": bool(rate and rate.enabled),
+            "assertable_demand": sum(v for k, v in assertable.items() if k in solves),
+            "inferred_demand": sum(v for k, v in inferred.items() if k in solves),
+            "proof": [p["name"] for p in catalog.proof_for(entry["slug"])],
+        })
+    services.sort(key=lambda s: -s["assertable_demand"])
+    return jsonify({
+        "researched_prospects": len(rows),
+        "assertable_problems": assertable,
+        "inferred_problems": inferred,
+        "services": services,
+        "note": ("Assertable demand counts problems Winston will state to a prospect as "
+                 "fact. Inferred demand counts problems derived from absence, which are "
+                 "real research but not sellable claims."),
+    })
+
+
 @app.route('/projects')
 def projects_list():
     """Sold engagements and their operator-reported status."""

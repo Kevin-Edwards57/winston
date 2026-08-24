@@ -102,11 +102,11 @@ class PipelineTests(unittest.TestCase):
 
         self.ai = MagicMock()
         self.ai.generate.return_value = MagicMock(
-            text="I noticed your site has no online ordering, so customers have to call "
-                 "to place an order. YardLink builds ordering systems that let people "
-                 "order directly from the site. Our YardLink Eats app already works with "
-                 "Caribbean restaurants across New York. Would it help to see what that "
-                 "could look like?",
+            text="I noticed your site has no main heading and no enquiry form, so people "
+                 "who find you in search have no easy way to get in touch. YardLink builds "
+                 "sites with proper structure and lead capture. Our YardLink Eats app "
+                 "already works with Caribbean restaurants across New York. Would it help "
+                 "to see what that could look like?",
             provider="ollama", model="qwen3:8b", input_tokens=10, output_tokens=40,
             estimated_cost_usd=0.0)
 
@@ -131,7 +131,7 @@ class PipelineTests(unittest.TestCase):
 
     def _ready(self):
         self._research()
-        self.catalog.verify("ordering-systems", actor="test")
+        self.catalog.verify("website-service", actor="test")
 
     # ── happy path ───────────────────────────────────────────────────────
 
@@ -154,7 +154,7 @@ class PipelineTests(unittest.TestCase):
             self.pipeline.generate(self.contact_id).draft_id)
         brief = record["brief"]
         self.assertTrue(all(p["evidence"] for p in brief["observed_problems"]))
-        self.assertEqual(brief["recommended_service"]["slug"], "ordering-systems")
+        self.assertEqual(brief["recommended_service"]["slug"], "website-service")
         self.assertTrue(brief["proof"])
         self.assertIn("relevance", brief["proof"][0])
 
@@ -188,7 +188,7 @@ class PipelineTests(unittest.TestCase):
     def test_em_dash_cannot_reach_the_queue(self):
         self._ready()
         self.ai.generate.return_value.text = (
-            "Your site has no online ordering — customers must call. Interested?")
+            "Your site has no main heading — search engines cannot read it. Interested?")
         result = self.pipeline.generate(self.contact_id)
         # The Writer sanitises at source, so this should survive; either way no em dash.
         if result.reviewable:
@@ -207,7 +207,7 @@ class PipelineTests(unittest.TestCase):
         self.ai.generate.assert_not_called()
 
     def test_unresearched_prospect_produces_no_draft(self):
-        self.catalog.verify("ordering-systems", actor="test")
+        self.catalog.verify("website-service", actor="test")
         result = self.pipeline.generate(self.contact_id)
         self.assertEqual(result.status, "no_evidence")
         self.ai.generate.assert_not_called()
@@ -300,7 +300,7 @@ class ProblemPrioritisationTests(unittest.TestCase):
             Problem("no_online_ordering", "No online ordering", 0.8, "e", 0.55),
         ]
 
-    def test_ordering_offer_leads_with_ordering(self):
+    def test_ordering_offer_leads_with_the_ordering_problem(self):
         from winston.writer import rank_problems
         ranked = rank_problems(self._problems(), self.catalog.get("ordering-systems"))
         self.assertEqual(ranked[0].code, "no_online_ordering")
@@ -310,7 +310,7 @@ class ProblemPrioritisationTests(unittest.TestCase):
         ranked = rank_problems(self._problems(), self.catalog.get("website-service"))
         self.assertIn(ranked[0].code, {"not_mobile_friendly", "no_ssl"})
 
-    def test_ordering_is_not_merely_array_order(self):
+    def test_ranking_is_not_merely_array_order(self):
         """The ordering problem is last in the input list and must still lead."""
         from winston.writer import rank_problems
         problems = self._problems()

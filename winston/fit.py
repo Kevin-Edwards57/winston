@@ -47,6 +47,20 @@ ORDERING_INDUSTRIES = {
 }
 
 
+# How strongly the evidence supports the claim. Only CONFIRMED may be sold against.
+#
+# The measurement detector taught this the expensive way: 11 of 13 "no analytics"
+# findings were wrong because absence of a visible tag was treated as absence of the
+# thing. The same shape applies to every problem derived from something not being
+# found, so assertability is a property of every problem rather than a special case.
+CONFIRMED = "confirmed"      # observed directly; the marker would be there if true
+INFERRED = "inferred"        # derived from absence, and something could be hiding it
+UNKNOWN = "unknown"          # research insufficient to say
+
+# A problem must clear this to enter a sales brief.
+ASSERTABLE_CONFIDENCE = 0.7
+
+
 @dataclass
 class Problem:
     """An observed business problem, with the evidence that produced it."""
@@ -55,10 +69,20 @@ class Problem:
     severity: float
     evidence: str
     confidence: float
+    assertability: str = CONFIRMED
+    limitations: list[str] = field(default_factory=list)
+
+    @property
+    def commercially_assertable(self) -> bool:
+        """Whether Winston may state this to a prospect as fact."""
+        return self.assertability == CONFIRMED and self.confidence >= ASSERTABLE_CONFIDENCE
 
     def as_dict(self) -> dict[str, Any]:
         return {"code": self.code, "label": self.label, "severity": round(self.severity, 2),
-                "evidence": self.evidence, "confidence": round(self.confidence, 2)}
+                "evidence": self.evidence, "confidence": round(self.confidence, 2),
+                "assertability": self.assertability,
+                "commercially_assertable": self.commercially_assertable,
+                "limitations": self.limitations}
 
 
 @dataclass
@@ -66,6 +90,8 @@ class FitResult:
     """A complete, explainable commercial assessment of one prospect."""
     contact_id: str
     problems: list[Problem] = field(default_factory=list)
+    assertable_problems: list[Problem] = field(default_factory=list)
+    inferred_problems: list[Problem] = field(default_factory=list)
     product_fit: float = 0.0
     service_fit: float = 0.0
     portfolio_relevance: float = 0.0
@@ -92,6 +118,8 @@ class FitResult:
                 "CONFIDENCE": round(self.confidence, 3),
             },
             "observed_problems": [p.as_dict() for p in self.problems],
+            "assertable_problems": [p.as_dict() for p in self.assertable_problems],
+            "inferred_problems": [p.as_dict() for p in self.inferred_problems],
             "recommended_product": self.recommended_product,
             "recommended_service": self.recommended_service,
             "proof": self.proof,
@@ -150,24 +178,45 @@ def derive_problems(signals: dict[str, dict[str, Any]], *, industry: str = "",
     # about the business. Selling against it produced three false opportunities in
     # the 50-prospect experiment, one of them to a Shopify store.
     measurement = observed("measurement_state")
-    if measurement and measurement["value"] == "confirmed_absence":
-        problems.append(Problem(
-            "no_measurement", "No analytics found, so marketing spend is unmeasurable",
-            0.5, measurement["evidence"], measurement["confidence"]))
+    if measurement:
+        limits = (signals.get("measurement_limitations") or {}).get("value") or []
+        if measurement["value"] == "confirmed_absence":
+            problems.append(Problem(
+                "no_measurement", "No analytics found, so marketing spend is unmeasurable",
+                0.5, measurement["evidence"], measurement["confidence"],
+                assertability=CONFIRMED, limitations=limits))
+        elif measurement["value"] == "not_detected":
+            # Recorded for the reviewer, never sold against.
+            problems.append(Problem(
+                "no_measurement", "Analytics not detected, but it may be present",
+                0.5, measurement["evidence"], measurement["confidence"],
+                assertability=INFERRED, limitations=limits))
 
     # Capability gaps are industry-conditional. A restaurant without online ordering
     # is a real problem; a photographer without it is not.
+    # Capability gaps are derived from absence, so they are inferred rather than
+    # observed. A booking widget can sit behind a phone-number link, on a page that
+    # was not fetched, or inside a client-rendered app. Winston records the gap and
+    # declines to assert it.
+    gap_limits = []
+    if signals.get("client_rendered"):
+        gap_limits.append("page is client-rendered; a widget may load after the document")
+    scripts = (signals.get("script_count") or {}).get("value") or 0
+    if isinstance(scripts, (int, float)) and scripts > 12:
+        gap_limits.append(f"{int(scripts)} external scripts; any may provide the capability")
+    gap_limits.append("only the pages Winston fetched were examined")
+
     if industry in BOOKING_INDUSTRIES and "online_booking" not in signals:
-        researched = bool(signals)
         problems.append(Problem(
-            "no_online_booking", "No online booking detected for an appointment business",
+            "no_online_booking", "No online booking found for an appointment business",
             0.8, "no booking platform found on the pages researched",
-            0.55 if researched else 0.2))
+            0.55 if signals else 0.2, assertability=INFERRED, limitations=list(gap_limits)))
 
     if industry in ORDERING_INDUSTRIES and "online_ordering" not in signals:
         problems.append(Problem(
-            "no_online_ordering", "No online ordering detected for a food business",
-            0.8, "no ordering platform found on the pages researched", 0.55))
+            "no_online_ordering", "No online ordering found for a food business",
+            0.8, "no ordering platform found on the pages researched", 0.55,
+            assertability=INFERRED, limitations=list(gap_limits)))
 
     seo_gaps = [name for name in ("has_title", "has_meta_description", "has_h1")
                 if (observed(name) or {}).get("value") is False]
@@ -337,8 +386,14 @@ class FitEngine:
         # ── 1. What does this business need? ──
         result.problems = derive_problems(
             signals, industry=industry, has_website=bool(contact["website"]))
-        if result.problems:
-            result.problem_severity = max(p.severity for p in result.problems)
+        # Everything is kept for the reviewer. Only assertable problems drive
+        # severity and opportunity, so a prospect cannot rank highly on evidence
+        # Winston is not willing to state.
+        assertable = [p for p in result.problems if p.commercially_assertable]
+        result.assertable_problems = assertable
+        result.inferred_problems = [p for p in result.problems if not p.commercially_assertable]
+        if assertable:
+            result.problem_severity = max(p.severity for p in assertable)
 
         researched = self.signals.last_researched(contact_id)
         if not researched:
@@ -367,10 +422,10 @@ class FitEngine:
         services = [e for e in offerable if e["kind"] == "SERVICE"]
 
         scored_products = sorted(
-            ((e, *_match_score(e, result.problems, industry)) for e in products),
+            ((e, *_match_score(e, assertable, industry)) for e in products),
             key=lambda row: row[1], reverse=True)
         scored_services = sorted(
-            ((e, *_match_score(e, result.problems, industry)) for e in services),
+            ((e, *_match_score(e, assertable, industry)) for e in services),
             key=lambda row: row[1], reverse=True)
 
         if scored_products and scored_products[0][1] > 0:
