@@ -154,3 +154,83 @@ prospect, and Winston declined to contact them.
    whatever its strategic value to YardLink Eats.
 4. Build the priority engine *after* service coverage, not before. Ranking prospects is
    pointless while the bottleneck is having nothing to offer them.
+
+---
+
+# Correction: the measurement detector was manufacturing opportunities
+
+The experiment recommended enabling `marketing-automation` because 13 prospects showed
+`no_measurement`. Investigating those 13 before acting found the recommendation was
+wrong, and the reason mattered more than the recommendation.
+
+## What was actually wrong
+
+`no_measurement` derived from a single boolean: no analytics tag found in static HTML.
+That is not the same claim as "this business does not measure anything".
+
+A static scan cannot see analytics that is:
+
+- loaded by a tag manager after the document
+- gated behind a consent banner until the visitor accepts
+- supplied by the platform, as on Shopify, Wix, Squarespace or WooCommerce
+- injected client-side after render
+- one of twenty external scripts, any of which may load it
+
+## The four-state model
+
+| State | Meaning | May be sold against |
+|---|---|---|
+| `detected` | Analytics found | no |
+| `confirmed_absence` | Server-rendered, no platform, no tag manager, no consent gate, few scripts | **yes** |
+| `not_detected` | Winston could not see it, and something could be hiding it | **no** |
+| `unknown` | Research did not complete | no |
+
+Every finding stores its state, evidence, confidence, and the specific limitations that
+applied.
+
+## Re-running the same 43 reachable prospects
+
+| | Before | After |
+|---|---|---|
+| `no_measurement` findings | 13 | **2** |
+| Total problems | 74 | 63 |
+| Offer match | 34/50 | **34/50** |
+
+**Eleven of thirteen were false positives**, an 85% error rate on that signal.
+
+| Withdrawn | Why |
+|---|---|
+| Ditmars Flower Shop | **Google Tag Manager** present |
+| Ode à la Rose | Google Tag Manager present |
+| Ora La Casa | **Shopify** platform analytics |
+| Flowers by Giorgie, Moe's Auto | WooCommerce platform analytics |
+| Hills Barber Shop | Square Online platform analytics |
+| Great Bear Auto | Consent manager defers loading |
+| Planet Maids, Posh Hair, Live In The Cut, Royal Beauty | 15 to 22 external scripts |
+
+Two genuine confirmed absences remain, both daycares.
+
+## The result that matters
+
+**Offer match did not move.** Correcting the detector cost zero commercial
+opportunities, because all eleven businesses already matched an offer on other evidence.
+`no_measurement` was never the reason to contact any of them; it was noise that would
+have justified a worse pitch.
+
+State distribution across 43 reachable prospects: 49% detected, 47% not detected,
+**5% confirmed absence**. The original detector reported 30% as having no analytics. The
+real, assertable figure is 5%.
+
+## What this changes about Winston
+
+The architecture now separates three things that were previously collapsed:
+
+```
+observed      no recognised analytics tag in static HTML
+inferred      analytics may be absent, and here is what could be hiding it
+commercial    do not pitch unless absence is confirmed
+```
+
+A detector that cannot distinguish "I did not see it" from "it is not there" will
+generate revenue-shaped noise. The fix was not a better analytics scanner. It was
+refusing to let an inference cross into a sales claim.

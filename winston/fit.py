@@ -145,11 +145,15 @@ def derive_problems(signals: dict[str, dict[str, Any]], *, industry: str = "",
             "no_lead_capture", "No enquiry form — visitors cannot leave details", 0.75,
             form["evidence"], form["confidence"]))
 
-    analytics = observed("has_analytics")
-    if analytics and analytics["value"] is False:
+    # Only a confirmed absence is a commercial problem. "Not detected" means Winston
+    # could not see analytics, which is a limit of the detector rather than a fact
+    # about the business. Selling against it produced three false opportunities in
+    # the 50-prospect experiment, one of them to a Shopify store.
+    measurement = observed("measurement_state")
+    if measurement and measurement["value"] == "confirmed_absence":
         problems.append(Problem(
-            "no_measurement", "No analytics — marketing spend is unmeasurable", 0.5,
-            analytics["evidence"], analytics["confidence"]))
+            "no_measurement", "No analytics found, so marketing spend is unmeasurable",
+            0.5, measurement["evidence"], measurement["confidence"]))
 
     # Capability gaps are industry-conditional. A restaurant without online ordering
     # is a real problem; a photographer without it is not.

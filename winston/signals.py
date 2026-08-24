@@ -132,6 +132,28 @@ ANALYTICS_TOOLS = [
     ("Hotjar", r"static\.hotjar\.com", 0.9),
 ]
 
+# Platforms that ship measurement whether or not a tag appears in static HTML.
+# A Shopify store has analytics by construction, so "no GA script" says nothing.
+PLATFORMS_WITH_BUILTIN_ANALYTICS = [
+    ("Shopify", r"cdn\.shopify\.com|shopify\.com/s/files|shopify\.theme", 0.95),
+    ("Wix", r"wix\.com|wixstatic\.com|parastorage\.com", 0.95),
+    ("Squarespace", r"squarespace\.com|squarespace-cdn\.com", 0.95),
+    ("BigCommerce", r"bigcommerce\.com", 0.95),
+    ("Webflow", r"webflow\.com|assets\.website-files\.com", 0.9),
+    ("Square Online", r"square\.site", 0.85),
+    ("WooCommerce", r"woocommerce", 0.9),
+    ("GoDaddy Website Builder", r"godaddysites\.com|img1\.wsimg\.com", 0.9),
+]
+
+# Tag managers and consent gates load analytics after the initial document, so
+# their presence means a static scan cannot see what is downstream of them.
+DEFERRED_ANALYTICS_INDICATORS = [
+    ("Google Tag Manager", r"googletagmanager\.com/gtm\.js|datalayer", 0.9),
+    ("Consent manager", r"cookiebot|onetrust|cookieyes|termly|iubenda|usercentrics|"
+                        r"cookie-?consent|cookiehub|klaro|osano", 0.85),
+    ("Tag loader", r"segment\.com/analytics\.js|cdn\.segment|tealium|ensighten", 0.9),
+]
+
 CHAT_TOOLS = [
     ("Intercom", r"widget\.intercom\.io", 0.95),
     ("Tawk.to", r"embed\.tawk\.to", 0.95),
@@ -286,12 +308,56 @@ def extract_signals(html: str, url: str = "") -> list[Signal]:
             add(name, False, confidence, negative_evidence)
         # else: withheld -- unknown, because the DOM had not rendered
 
+    # ── Measurement, as four states rather than a boolean ──
+    # "No analytics tag in static HTML" is not "this business does not measure".
+    # A Shopify store measures by construction; a tag manager loads analytics after
+    # the document; a consent gate defers it until the visitor accepts. Treating an
+    # unseen tag as an absent one manufactured commercial opportunities that were not
+    # there, so absence is only ever confirmed when nothing could be hiding it.
     analytics = _match_platform(lowered, ANALYTICS_TOOLS)
-    add_closed_world("has_analytics", bool(analytics),
-                     f"matched {analytics[1]!r}" if analytics else "",
-                     "no analytics tag found in page source", 0.9 if analytics else 0.6)
+    platform = _match_platform(lowered, PLATFORMS_WITH_BUILTIN_ANALYTICS)
+    deferred = _match_platform(lowered, DEFERRED_ANALYTICS_INDICATORS)
+
+    limitations: list[str] = []
+    if client_rendered:
+        limitations.append("page is client-rendered; scripts may load after the document")
+    if platform:
+        limitations.append(f"{platform[0]} provides platform-level analytics not visible in markup")
+    if deferred:
+        limitations.append(f"{deferred[0]} loads analytics after the initial document")
+    if structure.script_srcs and len(structure.script_srcs) > 12:
+        limitations.append(f"{len(structure.script_srcs)} external scripts; any may load analytics")
+
+    if analytics:
+        state, confidence = "detected", analytics[2]
+        evidence = f"matched {analytics[1]!r}"
+    elif deferred:
+        state, confidence = "not_detected", 0.35
+        evidence = f"{deferred[0]} present; analytics is likely downstream of it"
+    elif platform or client_rendered:
+        state, confidence = "not_detected", 0.3
+        evidence = "no analytics tag in static HTML, but the platform can supply it"
+    elif limitations:
+        state, confidence = "not_detected", 0.45
+        evidence = "no analytics tag found, with detection limits present"
+    else:
+        # Server-rendered, no platform that supplies analytics, no tag manager,
+        # no consent gate, few scripts. Absence here is worth asserting.
+        state, confidence = "confirmed_absence", 0.75
+        evidence = ("no analytics of any recognised kind, on a server-rendered page "
+                    "with no tag manager, consent gate or platform-level analytics")
+
+    add("measurement_state", state, confidence, evidence)
+    if limitations:
+        add("measurement_limitations", limitations, 0.9, "; ".join(limitations)[:400])
     if analytics:
         add("analytics_tool", analytics[0], analytics[2], f"matched {analytics[1]!r}")
+    if platform:
+        add("analytics_platform", platform[0], 0.9, f"matched {platform[1]!r}")
+
+    # Retained for compatibility, but only ever True on a positive detection.
+    if analytics:
+        add("has_analytics", True, analytics[2], f"matched {analytics[1]!r}")
 
     chat = _match_platform(lowered, CHAT_TOOLS)
     add_closed_world("has_chat_widget", bool(chat),
