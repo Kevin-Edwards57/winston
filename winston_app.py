@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, Response, url_for
+import hashlib
 import json
 import os
 import re
@@ -18,12 +19,12 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from winston.repository import WinstonRepository, utc_now
 from winston.ai import AIService, ProviderError
-from winston.commercial import CommercialLedger
+from winston.commercial import CommercialLedger, PROVENANCE_PRODUCTION
 from winston.signals import SignalStore, research_contact
 from winston.catalog import Catalog, CatalogValidationError, UnknownEntry
 from winston.fit import FitEngine
 from winston.writer import Writer
-from winston.guardian import Guardian
+from winston.guardian import Guardian, GuardianResult
 from winston.pipeline import OutreachPipeline
 from winston.pricing import PricingEngine, NoPricingBasis
 from winston.ratecard import RateCard
@@ -73,12 +74,19 @@ GOOGLE_PLACES_KEY    = os.getenv("GOOGLE_PLACES_KEY")
 # checkout, a test run, or a forgotten .env can never deliver to real people.
 WINSTON_DRY_RUN      = os.getenv("WINSTON_DRY_RUN", "true").strip().casefold() != "false"
 SEND_MIN_INTERVAL_S  = float(os.getenv("WINSTON_SEND_MIN_INTERVAL", "30"))
-SEND_MAX_PER_DAY     = int(os.getenv("WINSTON_SEND_MAX_PER_DAY", "50"))
+# First live campaign runs at 5. This is operational, not architectural: raise it
+# once real sends have produced real outcomes worth trusting.
+SEND_MAX_PER_DAY     = int(os.getenv("WINSTON_SEND_MAX_PER_DAY", "5"))
 
 _send_gate      = threading.Lock()
 _last_send_at   = 0.0
 _send_day       = ""
 _send_day_count = 0
+
+
+def _body_digest(subject: str, body: str) -> str:
+    """Identity of the exact text under review, so a verdict cannot outlive an edit."""
+    return hashlib.sha256(f"{subject}\n\n{body}".encode("utf-8")).hexdigest()
 
 
 class SendBlocked(RuntimeError):
@@ -618,15 +626,42 @@ def find_contact_info(website_url: str) -> tuple[str, str, dict]:
 # ============================================================
 # EMAIL SENDING
 # ============================================================
-def send_email_fn(to_email: str, business_name: str, body: str, subject: str = None) -> bool:
+def send_email_fn(to_email: str, business_name: str, body: str, subject: str = None,
+                  *, guardian_verdict: "GuardianResult" = None) -> bool:
     """The single production delivery primitive.
 
-    Reachable only from confirm_send() after the full state machine has run.
-    Three independent guards sit in front of SMTP: dry-run, a suppression
-    backstop, and rate limiting. Any one of them refusing means no mail.
+    Four guards sit in front of SMTP. The first is the one that matters most:
+    a Guardian verdict covering **this exact body**.
+
+    Guardian previously ran only at generation, which guaranteed "Guardian approved
+    a draft" but not "Guardian approved the message that was sent". The review screen
+    lets a human edit an approved draft, so an old PASS could authorise text Guardian
+    had never seen. The verdict is now a required argument rather than a convention,
+    which makes reaching SMTP without a fresh review a TypeError rather than a
+    judgement call.
     """
     if not subject:
         subject = f"Quick idea for {business_name}"
+
+    # Guard 0 — a verdict must exist, must have passed, and must cover this text.
+    if guardian_verdict is None:
+        log(f"BLOCKED: no Guardian verdict supplied for {to_email}")
+        repository.add_event("send.blocked", entity_type="contact",
+                             details={"reason": "no_guardian_verdict", "email": to_email})
+        return False
+    if not guardian_verdict.approved:
+        rules = ", ".join(i["rule"] for i in guardian_verdict.issues)
+        log(f"BLOCKED by Guardian at the send boundary: {rules}")
+        repository.add_event("send.blocked", entity_type="contact",
+                             details={"reason": "guardian_blocked", "rules":
+                                      [i["rule"] for i in guardian_verdict.issues],
+                                      "email": to_email})
+        return False
+    if guardian_verdict.reviewed_digest != _body_digest(subject, body):
+        log(f"BLOCKED: the verdict does not cover the text being sent to {to_email}")
+        repository.add_event("send.blocked", entity_type="contact",
+                             details={"reason": "verdict_body_mismatch", "email": to_email})
+        return False
 
     # Guard 1 — suppression backstop. claim_send() already checks this inside the
     # claiming transaction; repeating it here means no future caller can bypass it.
@@ -1190,7 +1225,24 @@ def confirm_send(job_id):
         job = repository.claim_send(job_id, worker_id)
         if not job:
             return jsonify({"success": False, "error": "Job unavailable or recipient suppressed"}), 409
-        success = send_email_fn(job["email"], job["name"], job["body"], job["subject"])
+        # Re-review the exact text about to be sent, against the evidence the draft
+        # was built from. An approved draft that was later edited gets caught here.
+        intelligence = pipeline.intelligence_for(job["draft_id"]) or {}
+        contact = {"id": job["contact_id"], "email": job["email"], "name": job["name"]}
+        verdict = guardian.review(subject=job["subject"], body=job["body"],
+                                  contact=contact, brief=intelligence.get("brief") or {})
+        verdict.reviewed_digest = _body_digest(job["subject"], job["body"])
+
+        if not verdict.approved:
+            repository.complete_send(job_id, success=False, error="Guardian blocked at send")
+            repository.add_event("send.guardian_blocked", entity_type="send_job",
+                                 entity_id=job_id,
+                                 details={"rules": [i["rule"] for i in verdict.issues]})
+            return jsonify({"success": False, "error": "Guardian blocked this message",
+                            "guardian": verdict.as_dict()}), 409
+
+        success = send_email_fn(job["email"], job["name"], job["body"], job["subject"],
+                                guardian_verdict=verdict)
         repository.complete_send(job_id, success=success, error="SMTP delivery failed" if not success else "")
 
         # Record the attempt in the commercial ledger regardless of outcome. A failed
@@ -1201,7 +1253,8 @@ def confirm_send(job_id):
         message_id = ledger.record_message(
             contact_id=job["contact_id"], to_email=job["email"], subject=job["subject"],
             body=job["body"], campaign_id=campaign_id, draft_id=job["draft_id"],
-            send_job_id=job_id, sent_at=utc_now() if success else None, source="winston:confirm_send")
+            send_job_id=job_id, sent_at=utc_now() if success else None,
+            source="winston:confirm_send", provenance=PROVENANCE_PRODUCTION)
         ledger.record_message_event(message_id, "sent" if success else "failed",
                                     detail={"dry_run": WINSTON_DRY_RUN})
 

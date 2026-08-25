@@ -5,7 +5,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 import winston_app
+from winston.guardian import GuardianResult
 from winston.repository import WinstonRepository
+
+
+def approved_for(subject: str, body: str) -> GuardianResult:
+    """A verdict covering this exact text.
+
+    send_email_fn now requires one. These tests exercise the guards behind it, so
+    they supply a valid verdict and let the guard under test do the refusing.
+    """
+    verdict = GuardianResult(approved=True)
+    verdict.reviewed_digest = winston_app._body_digest(subject, body)
+    return verdict
 
 
 class SendGuardTests(unittest.TestCase):
@@ -27,7 +39,8 @@ class SendGuardTests(unittest.TestCase):
     def test_dry_run_never_opens_smtp(self):
         with patch.object(winston_app, "WINSTON_DRY_RUN", True), \
              patch.object(winston_app.smtplib, "SMTP_SSL") as smtp:
-            result = winston_app.send_email_fn("nobody@example.com", "Biz", "body", "subj")
+            result = winston_app.send_email_fn("nobody@example.com", "Biz", "body", "subj",
+                                              guardian_verdict=approved_for("subj", "body"))
         self.assertTrue(result)
         smtp.assert_not_called()
 
@@ -35,7 +48,8 @@ class SendGuardTests(unittest.TestCase):
         winston_app.repository.suppress("blocked@example.com", "test")
         with patch.object(winston_app, "WINSTON_DRY_RUN", False), \
              patch.object(winston_app.smtplib, "SMTP_SSL") as smtp:
-            result = winston_app.send_email_fn("blocked@example.com", "Biz", "body", "subj")
+            result = winston_app.send_email_fn("blocked@example.com", "Biz", "body", "subj",
+                                              guardian_verdict=approved_for("subj", "body"))
         self.assertFalse(result)
         smtp.assert_not_called()
 
@@ -43,7 +57,8 @@ class SendGuardTests(unittest.TestCase):
         winston_app.repository.suppress("Mixed@Example.COM", "test")
         with patch.object(winston_app, "WINSTON_DRY_RUN", False), \
              patch.object(winston_app.smtplib, "SMTP_SSL") as smtp:
-            self.assertFalse(winston_app.send_email_fn("mixed@example.com", "Biz", "b", "s"))
+            self.assertFalse(winston_app.send_email_fn("mixed@example.com", "Biz", "b", "s",
+                                                       guardian_verdict=approved_for("s", "b")))
         smtp.assert_not_called()
 
     def test_daily_cap_blocks_further_sends(self):
@@ -51,7 +66,8 @@ class SendGuardTests(unittest.TestCase):
              patch.object(winston_app, "SEND_MAX_PER_DAY", 0), \
              patch.object(winston_app, "SEND_MIN_INTERVAL_S", 0), \
              patch.object(winston_app.smtplib, "SMTP_SSL") as smtp:
-            result = winston_app.send_email_fn("fresh@example.com", "Biz", "body", "subj")
+            result = winston_app.send_email_fn("fresh@example.com", "Biz", "body", "subj",
+                                              guardian_verdict=approved_for("subj", "body"))
         self.assertFalse(result)
         smtp.assert_not_called()
 

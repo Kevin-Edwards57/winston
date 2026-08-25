@@ -113,6 +113,9 @@ class GuardianResult:
     evidence_checks: list[dict[str, Any]] = field(default_factory=list)
     style_checks: list[dict[str, Any]] = field(default_factory=list)
     commercial_checks: list[dict[str, Any]] = field(default_factory=list)
+    # Digest of the exact subject and body reviewed. The send path compares this to
+    # what it is about to transmit, so a verdict cannot outlive an edit.
+    reviewed_digest: str = ""
 
     def fail(self, category: str, rule: str, detail: str, excerpt: str = "") -> None:
         entry = {"rule": rule, "detail": detail, "excerpt": excerpt[:160]}

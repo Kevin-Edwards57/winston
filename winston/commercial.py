@@ -27,6 +27,19 @@ from typing import Any, Iterable
 from .repository import WinstonRepository, normalize_email, stable_id, utc_now
 
 # Delivery lifecycle. Ordered loosely by how far a message got.
+# Where a message came from, and therefore what it may be used for.
+#
+# The 139 rows migrated from followups.json were real emails the legacy script sent,
+# but they carry no evidence chain: no observed problem, no offer, no proof, no price,
+# no Guardian verdict. As training data they are 139 outcomes with no features, which
+# is worse than no data because it looks like data. Eligibility is therefore a stored
+# property enforced in queries, not a convention someone has to remember.
+PROVENANCE_LEGACY = "legacy_backfill"
+PROVENANCE_PRODUCTION = "winston_production"
+
+# Only production sends carry the reasoning a learner would need.
+LEARNER_ELIGIBLE_PROVENANCE = frozenset({PROVENANCE_PRODUCTION})
+
 MESSAGE_EVENTS = (
     "queued", "sent", "delivered", "deferred", "bounced_soft", "bounced_hard",
     "complained", "unsubscribed", "opened", "clicked", "failed",
@@ -85,10 +98,13 @@ CREATE TABLE IF NOT EXISTS messages (
     sent_at TEXT,
     source TEXT NOT NULL,
     source_record_id TEXT,
+    provenance TEXT NOT NULL DEFAULT 'legacy_backfill',
+    learner_eligible INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE(source, source_record_id)
 );
 CREATE INDEX IF NOT EXISTS messages_contact ON messages(contact_id);
+CREATE INDEX IF NOT EXISTS messages_provenance ON messages(provenance, learner_eligible);
 CREATE INDEX IF NOT EXISTS messages_campaign ON messages(campaign_id);
 CREATE INDEX IF NOT EXISTS messages_email ON messages(normalized_email);
 CREATE INDEX IF NOT EXISTS messages_sent_at ON messages(sent_at DESC);
@@ -222,8 +238,26 @@ class CommercialLedger:
 
     # ── setup ────────────────────────────────────────────────────────────
 
+    # Additive migration for ledgers created before provenance existed.
+    NEW_MESSAGE_COLUMNS = (
+        ("provenance", "TEXT NOT NULL DEFAULT 'legacy_backfill'"),
+        ("learner_eligible", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
     def initialize(self) -> None:
         with self.repository.transaction(immediate=True) as connection:
+            # Columns first: the schema script indexes them, and CREATE TABLE
+            # IF NOT EXISTS will not add a column to a table that already exists.
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(messages)")}
+            if existing:
+                for column, definition in self.NEW_MESSAGE_COLUMNS:
+                    if column not in existing:
+                        connection.execute(
+                            f"ALTER TABLE messages ADD COLUMN {column} {definition}")
+                # Anything already present predates the production pipeline.
+                connection.execute(
+                    "UPDATE messages SET provenance=?, learner_eligible=0 "
+                    "WHERE source LIKE 'backfill:%'", (PROVENANCE_LEGACY,))
             connection.executescript(COMMERCIAL_SCHEMA)
             for code, label, category in DEFAULT_LOSS_REASONS:
                 connection.execute(
@@ -255,8 +289,13 @@ class CommercialLedger:
                        campaign_id: str | None = None, draft_id: str | None = None,
                        send_job_id: str | None = None, channel: str = "email",
                        sent_at: str | None = None, source: str = "winston",
-                       source_record_id: str | None = None) -> str:
-        """Record an outbound message. Returns the existing id when already recorded."""
+                       source_record_id: str | None = None,
+                       provenance: str = PROVENANCE_LEGACY) -> str:
+        """Record an outbound message. Returns the existing id when already recorded.
+
+        Provenance defaults to legacy, so a caller that does not think about it creates
+        a record excluded from learning. An absent value must never mean eligible.
+        """
         source_record_id = source_record_id or send_job_id or str(uuid.uuid4())
         message_id = stable_id("message", source, source_record_id)
         now = utc_now()
@@ -264,12 +303,14 @@ class CommercialLedger:
             connection.execute(
                 """INSERT INTO messages(id,campaign_id,contact_id,draft_id,send_job_id,channel,
                                         direction,to_email,normalized_email,subject,body,sent_at,
-                                        source,source_record_id,created_at)
-                   VALUES(?,?,?,?,?,?,'outbound',?,?,?,?,?,?,?,?)
+                                        source,source_record_id,provenance,learner_eligible,
+                                        created_at)
+                   VALUES(?,?,?,?,?,?,'outbound',?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(source, source_record_id) DO NOTHING""",
                 (message_id, campaign_id, contact_id, draft_id, send_job_id, channel,
                  to_email, normalize_email(to_email), subject, body, sent_at,
-                 source, source_record_id, now),
+                 source, source_record_id, provenance,
+                 int(provenance in LEARNER_ELIGIBLE_PROVENANCE), now),
             )
             row = connection.execute(
                 "SELECT id FROM messages WHERE source=? AND source_record_id=?",
@@ -517,6 +558,42 @@ class CommercialLedger:
                                 "WHERE contact_id=? ORDER BY occurred_at"),
             }
 
+    def learning_dataset(self) -> list[dict[str, Any]]:
+        """Messages a learner may train on. Enforced in SQL, not by convention.
+
+        A message qualifies only when it was produced by the production pipeline and
+        still carries the draft it came from. Legacy rows fail both conditions.
+        """
+        with self.repository.read() as connection:
+            rows = connection.execute(
+                """SELECT m.id, m.contact_id, m.campaign_id, m.draft_id, m.subject,
+                          m.sent_at, m.provenance
+                   FROM messages m
+                   WHERE m.learner_eligible = 1
+                     AND m.provenance = ?
+                     AND m.draft_id IS NOT NULL
+                   ORDER BY m.sent_at""", (PROVENANCE_PRODUCTION,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def dataset_readiness(self) -> dict[str, Any]:
+        """Whether there is enough real outcome data to learn anything."""
+        with self.repository.read() as connection:
+            eligible = connection.execute(
+                "SELECT COUNT(*) n FROM messages WHERE learner_eligible=1").fetchone()["n"]
+            excluded = connection.execute(
+                "SELECT COUNT(*) n FROM messages WHERE learner_eligible=0").fetchone()["n"]
+            replies = connection.execute("SELECT COUNT(*) n FROM replies").fetchone()["n"]
+            deals = connection.execute("SELECT COUNT(*) n FROM deals").fetchone()["n"]
+        return {
+            "learner_eligible_messages": eligible,
+            "excluded_legacy_messages": excluded,
+            "replies": replies, "closed_deals": deals,
+            "ml_status": "INSUFFICIENT_DATA" if eligible < 30 or replies == 0 else "REVIEW",
+            "reason": (f"{eligible} eligible message(s), {replies} reply/replies, "
+                       f"{deals} closed deal(s). {excluded} legacy record(s) excluded "
+                       "because they carry no evidence chain."),
+        }
+
     # ── backfill ─────────────────────────────────────────────────────────
 
     def backfill_from_sent_messages(self, campaign_slug: str = "legacy-2026") -> dict[str, int]:
@@ -542,6 +619,7 @@ class CommercialLedger:
                 subject=row["subject"] or "", body=row["body"] or "",
                 campaign_id=campaign_id, sent_at=row["sent_at"],
                 source="backfill:sent_messages", source_record_id=str(row["id"]),
+                provenance=PROVENANCE_LEGACY,
             )
             imported += 1
             if row["sent_at"]:
