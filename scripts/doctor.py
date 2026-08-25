@@ -171,6 +171,49 @@ except (urllib.error.URLError, TimeoutError, OSError):
     else:
         record("WARN", "Winston responding", f"not running. Start it with ./winstonctl start")
 
+# ── Mail credentials ─────────────────────────────────────────────────────
+# Checked live because a revoked app password is invisible in dry-run: Winston
+# reports every send as successful without ever contacting a server. This was
+# discovered when the credential turned out to be dead for both protocols after
+# months of apparently healthy dry-run operation.
+section("Mail")
+try:
+    from dotenv import dotenv_values
+    env = dotenv_values(ROOT / ".env")
+    address = (env.get("GMAIL_ADDRESS") or "").strip()
+    password = (env.get("GMAIL_APP_PASSWORD") or "").replace(" ", "")
+
+    if not address or not password:
+        record("FAIL", "Mail credentials", "GMAIL_ADDRESS or GMAIL_APP_PASSWORD is not set")
+    elif len(password) != 16:
+        record("WARN", "App password shape",
+               f"{len(password)} characters; Gmail app passwords are 16")
+    else:
+        record("PASS", "App password shape", "16 characters")
+
+    if address and password:
+        import smtplib
+        try:
+            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12)
+            server.login(address, password)
+            server.quit()
+            record("PASS", "SMTP authentication", "sending is possible")
+        except Exception as exc:
+            record("FAIL", "SMTP authentication",
+                   f"{str(exc)[:70]}. Winston cannot send until this is fixed.")
+
+        import imaplib
+        try:
+            box = imaplib.IMAP4_SSL("imap.gmail.com")
+            box.login(address, password)
+            box.logout()
+            record("PASS", "IMAP authentication", "reply tracking is possible")
+        except Exception as exc:
+            record("FAIL", "IMAP authentication",
+                   f"{str(exc)[:70]}. Winston cannot detect replies until this is fixed.")
+except Exception as exc:
+    record("WARN", "Mail credentials", f"could not be checked: {type(exc).__name__}")
+
 # ── Summary ──────────────────────────────────────────────────────────────
 counts = {state: sum(1 for s, _, _ in results if s == state) for state in ("PASS", "WARN", "FAIL")}
 print(f"\n{counts['PASS']} passed, {counts['WARN']} warnings, {counts['FAIL']} failures")

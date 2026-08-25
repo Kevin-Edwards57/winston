@@ -233,12 +233,19 @@ class InboxScanner:
     # ── the scan ─────────────────────────────────────────────────────────
 
     def scan(self, *, mailbox: str = "INBOX", limit: int = 200,
-             mark_seen: bool = False) -> dict[str, Any]:
+             mark_seen: bool = False, persist: bool = True,
+             search: str = "UNSEEN") -> dict[str, Any]:
         """Scan for replies and delivery notifications, recording each as an event.
 
         Read-only against the mailbox by default: nothing is deleted, and messages
         stay unread unless ``mark_seen`` is set.
+
+        ``persist=False`` additionally makes the scan read-only against the *database*.
+        Classification still runs, so the results are real, but no reply, suppression,
+        delivery event or setting is written. That is what makes it safe to point at a
+        live personal mailbox to find out whether the integration works at all.
         """
+        self._persist = persist
         summary = {
             "scanned": 0, "replies": 0, "positive": 0, "negative": 0, "neutral": 0,
             "auto_replies": 0, "hard_bounces": 0, "soft_bounces": 0,
@@ -248,7 +255,7 @@ class InboxScanner:
         connection = self._connect()
         try:
             connection.select(mailbox, readonly=not mark_seen)
-            status, data = connection.search(None, "UNSEEN")
+            status, data = connection.search(None, search)
             if status != "OK":
                 raise RuntimeError(f"IMAP search failed: {status}")
             ids = data[0].split()[-limit:]
@@ -265,15 +272,36 @@ class InboxScanner:
                 pass
             connection.logout()
 
-        # Marks reply data as observable. Until this key exists, the funnel reports
-        # reply rates as unknown rather than zero.
-        self.repository.set_setting("inbox_last_scanned_at", utc_now())
-        self.repository.add_event("inbox.scanned", details=summary)
+        # Marks reply data as observable. A verification scan must not flip this:
+        # proving the mailbox is reachable is not the same as tracking replies.
+        if persist:
+            self.repository.set_setting("inbox_last_scanned_at", utc_now())
+            self.repository.add_event("inbox.scanned", details=summary)
+        summary["persisted"] = persist
         return summary
+
+    # ── persistence, gated ───────────────────────────────────────────────
+    # Every database write in this module goes through these, so a verification
+    # scan cannot mutate state by forgetting one call site.
+
+    def _write_record_message_event(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_persist", True):
+            self.ledger.record_message_event(*args, **kwargs)
+
+    def _write_suppress(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_persist", True):
+            self.repository.suppress(*args, **kwargs)
+
+    def _write_record_reply(self, *args: Any, **kwargs: Any) -> None:
+        if getattr(self, "_persist", True):
+            self.ledger.record_reply(*args, **kwargs)
 
     def _process_one(self, connection: imaplib.IMAP4_SSL, uid: bytes,
                      summary: dict[str, Any]) -> None:
-        status, payload = connection.fetch(uid, "(RFC822)")
+        # BODY.PEEK[] rather than RFC822. RFC822 implicitly sets the \Seen flag, and
+        # relying on readonly select to suppress that puts the guarantee in the server's
+        # hands rather than in the request. PEEK states the intent explicitly.
+        status, payload = connection.fetch(uid, "(BODY.PEEK[])")
         if status != "OK" or not payload or not isinstance(payload[0], tuple):
             summary["errors"] += 1
             return
@@ -303,23 +331,23 @@ class InboxScanner:
             summary[key] += 1
             if message_row_id:
                 # record_message_event suppresses on hard bounce.
-                self.ledger.record_message_event(
+                self._write_record_message_event(
                     message_row_id, verdict.kind, occurred_at=received_at,
                     detail={"evidence": verdict.evidence, "method": verdict.method},
                     source="imap")
             elif verdict.kind == "bounce_hard" and target_email:
-                self.repository.suppress(target_email, "delivery:bounced_hard", contact_id)
+                self._write_suppress(target_email, "delivery:bounced_hard", contact_id)
             return
 
         if verdict.kind == "unsubscribe":
             summary["unsubscribes"] += 1
             if target_email:
-                self.repository.suppress(target_email, "unsubscribe:requested", contact_id)
+                self._write_suppress(target_email, "unsubscribe:requested", contact_id)
             if message_row_id:
-                self.ledger.record_message_event(
+                self._write_record_message_event(
                     message_row_id, "unsubscribed", occurred_at=received_at,
                     detail={"evidence": verdict.evidence}, source="imap")
-            self.ledger.record_reply(
+            self._write_record_reply(
                 from_email=from_email, subject=subject, body=body, received_at=received_at,
                 message_id=message_row_id, contact_id=contact_id, sentiment="negative",
                 classified_by=f"inbox:{verdict.method}", confidence=verdict.confidence,
@@ -328,7 +356,7 @@ class InboxScanner:
 
         if verdict.kind == "auto_reply":
             summary["auto_replies"] += 1
-            self.ledger.record_reply(
+            self._write_record_reply(
                 from_email=from_email, subject=subject, body=body, received_at=received_at,
                 message_id=message_row_id, contact_id=contact_id,
                 sentiment=verdict.sentiment if verdict.sentiment in ("out_of_office", "auto_reply") else "auto_reply",
@@ -348,7 +376,7 @@ class InboxScanner:
         summary["replies"] += 1
         summary[{"positive": "positive", "negative": "negative"}.get(sentiment, "neutral")] += 1
 
-        self.ledger.record_reply(
+        self._write_record_reply(
             from_email=from_email, subject=subject, body=body, received_at=received_at,
             message_id=message_row_id, contact_id=contact_id, sentiment=sentiment,
             classified_by=f"inbox:{method}", confidence=confidence,
