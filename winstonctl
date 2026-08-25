@@ -95,6 +95,7 @@ cmd_backup() {
 cmd_install()   { bash "$ROOT/scripts/install_winston_service.sh"; }
 cmd_uninstall() { bash "$ROOT/scripts/uninstall_winston_service.sh"; }
 cmd_doctor()    { "$(python_bin)" "$ROOT/scripts/doctor.py"; }
+cmd_mail()      { "$(python_bin)" "$ROOT/scripts/setup_mail.py"; }
 
 case "${1:-help}" in
   start)     cmd_start ;;
@@ -120,6 +121,7 @@ Winston management
   ./winstonctl logs        follow the application log
   ./winstonctl errors      recent errors
   ./winstonctl doctor      diagnose the whole setup
+  ./winstonctl mail        set up and verify the Gmail credential
   ./winstonctl backup      timestamped SQLite backup with integrity check
   ./winstonctl install     start automatically at login (launchd)
   ./winstonctl uninstall   remove autostart
