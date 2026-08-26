@@ -25,22 +25,29 @@ python_bin() {
 is_running() { curl -sf "$URL/health" >/dev/null 2>&1; }
 
 wait_for_health() {
-  for _ in $(seq 1 40); do is_running && return 0; sleep 0.5; done
+  for _ in $(seq 1 "${1:-40}"); do is_running && return 0; sleep 0.5; done
   return 1
 }
 
 cmd_start() {
   if is_running; then green "Winston is already running at $URL"; return 0; fi
   mkdir -p "$LOG_DIR"
+  # Try launchd first when autostart is installed, but never depend on it. launchd
+  # can refuse a job before exec (EX_CONFIG) without writing anything to the log,
+  # which leaves the CLI reporting failure for a server that runs fine by hand.
   if [ -f "$PLIST" ]; then
-    launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null
-  else
-    WINSTON_PORT="$PORT" nohup "$(python_bin)" winston_app.py \
-      >> "$LOG_DIR/winston.log" 2>> "$LOG_DIR/winston.error.log" &
+    launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>/dev/null \
+      || launchctl load "$PLIST" 2>/dev/null || true
+    if wait_for_health 8; then green "Winston is running at $URL (launchd)"; return 0; fi
+    amber "launchd did not bring Winston up; starting it directly."
   fi
+
+  WINSTON_PORT="$PORT" nohup "$(python_bin)" winston_app.py \
+    >> "$LOG_DIR/winston.log" 2>> "$LOG_DIR/winston.error.log" &
+
   if wait_for_health; then green "Winston is running at $URL"; else
     red "Winston did not become healthy. Recent errors:"
-    tail -20 "$LOG_DIR/winston.error.log" 2>/dev/null
+    grep -v "^127.0.0.1" "$LOG_DIR/winston.error.log" 2>/dev/null | tail -20
     return 1
   fi
 }

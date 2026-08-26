@@ -131,12 +131,32 @@ class RouteTests(unittest.TestCase):
         self.assertIn("unresearched", payload["coverage"])
 
     def test_agent_center_lists_only_implemented_roles_as_active(self):
-        """A function is not an agent because it has a good name."""
-        active = re.findall(r"status:'active',fn:'([^']+)'", SCRIPT)
-        for implementation in active:
-            self.assertNotEqual(implementation, "—",
-                                "a role with no implementation is listed as active")
-        self.assertIn("status:'blocked'", SCRIPT, "unbuilt roles must be marked, not hidden")
+        """A function is not an agent because it has a good name.
+
+        This previously inspected a hardcoded array in the frontend. The Agent Center
+        now renders whatever /agents returns, and that endpoint derives status from the
+        database, so the invariant belongs against the API rather than the script.
+        """
+        payload = self.client.get("/agents").get_json()
+        for agent in payload["agents"]:
+            if agent["operational"]:
+                self.assertTrue(agent["implemented"],
+                                f"{agent['name']} is operational with no implementation")
+        unbuilt = [a for a in payload["agents"] if not a["operational"]]
+        self.assertTrue(unbuilt, "unbuilt roles must be shown, not hidden")
+        for agent in unbuilt:
+            self.assertTrue(agent["status_reason"],
+                            f"{agent['name']} is not operational without saying why")
+
+    def test_agent_center_renders_from_the_api_not_a_constant(self):
+        """A hardcoded list drifts from the code it claims to describe."""
+        self.assertIn("api('/agents')", SCRIPT)
+        self.assertNotIn("const AGENTS=[", SCRIPT)
+
+    def test_ml_is_not_presented_as_an_agent(self):
+        payload = self.client.get("/agents").get_json()
+        self.assertNotIn("ML", {a["name"] for a in payload["agents"]})
+        self.assertEqual(payload["ml"]["status"], "insufficient_data")
 
     def test_command_palette_exists(self):
         self.assertIn("openPalette", SCRIPT)

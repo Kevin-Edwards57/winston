@@ -524,51 +524,52 @@ function pollResearch(){
    an agent because it has a good name, and a dashboard implying otherwise
    would be exactly the fake-agent theatre worth avoiding. */
 
-const AGENTS=[
-  {name:'Scout',status:'active',fn:'google_places_search',role:'Business discovery',
-   note:'Queries Google Places across categories and boroughs. Costs money, so it is opt-in.'},
-  {name:'Researcher',status:'active',fn:'research_contact',role:'Website and contact research',
-   note:'Fetches a site, follows contact pages, extracts email, phone and social.'},
-  {name:'Auditor',status:'active',fn:'extract_signals / derive_problems',role:'Digital-presence analysis',
-   note:'Deterministic. Withholds a negative when the page is client-rendered rather than guessing.'},
-  {name:'Strategist',status:'active',fn:'FitEngine.assess',role:'Offer matching',
-   note:'Scores product fit, service fit and proof relevance separately.'},
-  {name:'Pricer',status:'active',fn:'PricingEngine.quote',role:'Commercial pricing',
-   note:'Refuses without a rate card. Protected characteristics cannot reach it.'},
-  {name:'Writer',status:'active',fn:'Writer.write',role:'Outreach generation',
-   note:'Only states facts present in the brief. Declines when no verified offer fits.'},
-  {name:'Guardian',status:'active',fn:'Guardian.review',role:'Deterministic safety gate',
-   note:'Veto power. No bypass exists anywhere in the codebase.'},
-  {name:'Provider Router',status:'active',fn:'ProviderRegistry.route',role:'Model selection',
-   note:'Cheapest capable model first. Paid escalation needs two independent gates.'},
-  {name:'Inbox',status:'built, never run',fn:'InboxScanner.scan',role:'Reply classification',
-   note:'Implemented and unit tested, but has never run against a real mailbox.'},
-  {name:'Negotiator',status:'planned',fn:'—',role:'Reply handling and next action',
-   note:'Not implemented.'},
-  {name:'Learner',status:'blocked',fn:'—',role:'Outcome learning',
-   note:'Waiting on labelled outcomes. Zero replies, meetings or closed deals recorded.'},
-  {name:'ML Engine',status:'blocked',fn:'—',role:'Prediction',
-   note:'Insufficient data. Training on zero positive examples is not possible.'},
-];
-
 async function loadAgents(){
+  /* Sourced from the backend registry, where status is derived from the database
+     rather than declared, so this view cannot claim a capability Winston lacks. */
+  const data=await api('/agents');
   const root=$('agents-body');root.replaceChildren();
-  const active=AGENTS.filter(a=>a.status==='active').length;
   root.append(el('div','ok-banner',
-    `${active} of ${AGENTS.length} roles are implemented and running. The rest are listed as planned or blocked rather than shown as active.`));
+    `${data.operational} of ${data.total} roles operational. ${data.deterministic} are `+
+    `deterministic functions and ${data.model_driven} involve a model. `+
+    `${data.with_execution_history} have real execution history.`));
+  root.append(el('div','intel-note',data.note));
+
   const wrap=el('div');
-  table(wrap,['Role','Status','Implementation','Responsibility','Notes'],AGENTS,item=>{
-    const tr=el('tr');
-    tr.append(el('td',null,item.name));
-    const st=el('td');
-    st.append(badge(item.status,item.status==='active'?'ok':item.status==='blocked'?'muted':'warn'));
-    tr.append(st);
-    tr.append(el('td','mono',item.fn));
-    tr.append(el('td','muted',item.role));
-    tr.append(el('td','muted',item.note));
-    return tr;
-  },'No agents.');
+  table(wrap,['Role','Status','Kind','Implementation','Runs','Avg latency','Why this status'],
+    data.agents,item=>{
+      const tr=el('tr');
+      tr.append(el('td',null,item.name));
+      const st=el('td');
+      st.append(badge(item.status.replaceAll('_',' '),
+        item.operational?'ok':item.status==='planned'?'muted':'warn'));
+      tr.append(st);
+      const kind=el('td');
+      kind.append(badge(item.kind,item.model_driven?'info':'ok'));
+      tr.append(kind);
+      tr.append(el('td','mono',item.implementation));
+      const ex=item.execution;
+      tr.append(el('td','mono',ex.has_history?`${ex.runs} (${ex.failures} failed)`:'none'));
+      tr.append(el('td','mono',ex.avg_latency_ms!=null?`${ex.avg_latency_ms}ms`:'—'));
+      tr.append(el('td','muted',item.status_reason));
+      return tr;
+    },'No agents.');
   root.append(wrap);
+
+  const ml=el('div','intel-section');
+  const h=el('h4');h.textContent='ML';h.append(badge(data.ml.status.replaceAll('_',' '),'muted'));
+  ml.append(h,el('p','intel-note',data.ml.note));
+  root.append(ml);
+
+  const detail=el('div','intel-section');
+  detail.append(el('h4',null,'What each role refuses to do'));
+  data.agents.filter(a=>a.refusals.length).forEach(item=>{
+    const card=el('div','evidence-card');
+    card.append(el('b',null,item.name));
+    item.refusals.forEach(r=>card.append(el('small',null,r)));
+    detail.append(card);
+  });
+  root.append(detail);
 }
 
 /* ── Command palette ────────────────────────────────────────────────────

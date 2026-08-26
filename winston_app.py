@@ -32,6 +32,7 @@ from winston.providers import ProviderRegistry
 from winston.costs import BudgetGuard
 from winston.fulfillment import FulfilmentBridge, NotBuilderFulfilled
 from winston.questions import InvestigationEngine, QuestionWriter
+from winston.agents import AgentRegistry
 
 load_dotenv()
 
@@ -56,6 +57,8 @@ fulfilment = FulfilmentBridge(repository, catalog, signal_store, fit_engine)
 fulfilment.initialize()
 writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
+agents = AgentRegistry(repository, ledger)
+agents.initialize()
 investigations = InvestigationEngine(repository, catalog, fit_engine)
 question_writer = QuestionWriter(repository, catalog, investigations, ai_service)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
@@ -995,7 +998,18 @@ def run_existing_contact_drafts(limit: int):
         if business["website"] and not signal_store.last_researched(contact["id"]):
             research_contact(repository, signal_store, contact["id"], business["website"])
 
+        started = time.monotonic()
         outcome = pipeline.generate(contact["id"])
+        agents.record("Writer", status="ok" if outcome.reviewable else "refused",
+                      contact_id=contact["id"], task="outreach_draft",
+                      latency_ms=int((time.monotonic() - started) * 1000),
+                      provider=outcome.draft.provider if outcome.draft else "",
+                      model=outcome.draft.model if outcome.draft else "",
+                      error="" if outcome.reviewable else outcome.reason[:200],
+                      result_reference=outcome.draft_id or "")
+        agents.record("Guardian", status="ok" if outcome.reviewable else "blocked",
+                      contact_id=contact["id"], task="review",
+                      error="" if outcome.reviewable else outcome.reason[:200])
         if not outcome.reviewable:
             progress["failed"] += 1
             progress.setdefault("skipped_reasons", {})
@@ -1519,7 +1533,12 @@ def run_bulk_research(limit: int) -> None:
             if not progress["running"]:
                 log("Research batch stopped by operator")
                 break
+            started = time.monotonic()
             result = research_contact(repository, signal_store, contact["id"], contact["website"])
+            agents.record("Researcher", status=result["status"],
+                          contact_id=contact["id"], task="website_research",
+                          latency_ms=int((time.monotonic() - started) * 1000),
+                          error="" if result["status"] == "ok" else result["status"])
             if result["status"] == "ok":
                 progress["completed"] += 1
                 progress["signals"] += result.get("signals", 0)
@@ -1532,6 +1551,12 @@ def run_bulk_research(limit: int) -> None:
             f"{progress['unreachable']} unreachable, {progress['failed']} failed")
     finally:
         progress["running"] = False
+
+
+@app.route('/agents')
+def agent_registry():
+    """Every role, its real implementation, and its measured state."""
+    return jsonify(agents.summary())
 
 
 @app.route('/investigations')
