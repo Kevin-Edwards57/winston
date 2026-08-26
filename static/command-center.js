@@ -229,7 +229,7 @@ function bind(){
 
 window.addEventListener('hashchange',()=>showView(location.hash.slice(1)));
 
-async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{await Promise.all([loadDashboard(),loadLeads(false)]);setInterval(()=>{loadDashboard().catch(()=>{});loadLeads(true).catch(()=>{})},10000)}catch(error){toast(error.message,true);$('online-label').textContent='DEGRADED'}}
+async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{await Promise.all([loadDashboard(),loadLeads(false)]);setInterval(()=>{loadDashboard().catch(()=>{});loadLeads(true).catch(()=>{});loadActionCenter().catch(()=>{})},10000)}catch(error){toast(error.message,true);$('online-label').textContent='DEGRADED'}}
 
 
 /* ── Real views ───────────────────────────────────────────────────────────
@@ -237,7 +237,7 @@ async function boot(){bind();showView(location.hash.slice(1)||'editorial');try{a
    tab, the rest fired toasts or scrolled. These are actual views over data
    the backend already exposes. */
 
-const VIEWS = ['editorial','sent','social','blocked','pricing','catalog','providers','research','projects','agents','ops'];
+const VIEWS = ['editorial','sent','social','investigations','demand','blocked','pricing','catalog','providers','research','projects','agents','ops'];
 
 function showView(name){
   if(!VIEWS.includes(name)) name='editorial';
@@ -246,7 +246,8 @@ function showView(name){
   if(location.hash.slice(1)!==name) history.replaceState(null,'',`#${name}`);
   const loader={sent:loadSent,social:loadSocial,blocked:loadBlocked,pricing:loadPricing,
                 catalog:loadCatalog,providers:loadProviders,research:loadResearch,
-                projects:loadProjects,agents:loadAgents,ops:loadOps}[name];
+                projects:loadProjects,agents:loadAgents,ops:loadOps,
+                investigations:loadInvestigations,demand:loadDemand}[name];
   if(loader) loader().catch(error=>toast(error.message,true));
 }
 
@@ -655,6 +656,114 @@ async function loadProjects(){
       tr.append(el('td','mono',item.agreed_price_usd?`$${Math.round(item.agreed_price_usd).toLocaleString()}`:'—'));
       return tr;
     },'No client projects yet. A prospect becomes a project once they buy.');
+}
+
+
+/* ── Investigations ─────────────────────────────────────────────────────
+   Inferred problems. Winston may ask about these and may never assert them,
+   so the view keeps that distinction visible rather than blending them into
+   the confirmed opportunities. */
+
+async function loadInvestigations(){
+  const data=await api('/investigations');
+  const summary=$('inv-summary');summary.replaceChildren();
+  const strip=el('div','cost-strip');
+  [['Researched',data.researched_prospects],
+   ['Actionable',data.actionable_investigations],
+   ['No verified offer',data.unactionable_investigations]].forEach(([label,value])=>{
+    const box=el('div','cost-box');box.append(el('small',null,label),el('strong',null,String(value)));strip.append(box)});
+  summary.append(strip);
+  summary.append(el('div','intel-note',data.note));
+  $('nav-inv-count').textContent=data.actionable_investigations;
+
+  const topics=Object.entries(data.by_topic||{});
+  const root=$('inv-body');
+  table(root,['Topic','Actionable prospects','What Winston may do'],topics,([topic,count])=>{
+    const tr=el('tr');
+    tr.append(el('td',null,topic));
+    tr.append(el('td','mono',String(count)));
+    const allowed=el('td');
+    allowed.append(badge('ask','ok'));
+    allowed.append(badge('never assert','bad'));
+    tr.append(allowed);return tr;
+  },'No actionable investigations. Inferred problems exist only where a verified service could address them.');
+}
+
+/* Offer demand. Confirmed and inferred are never summed: doing so is how
+   booking-systems looked like the strongest opportunity on 15 matches that
+   all rested on absence. */
+async function loadDemand(){
+  const data=await api('/intelligence/offers');
+  const root=$('demand-body');root.replaceChildren();
+  root.append(el('div','intel-note',data.note));
+  const rows=(data.services||[]).filter(s=>s.assertable_demand||s.inferred_demand);
+  const wrap=el('div');
+  table(wrap,['Service','Confirmed demand','Inferred demand','Verified','Offerable','Proof'],rows,item=>{
+    const tr=el('tr');
+    tr.append(el('td',null,item.name));
+    const confirmed=el('td','mono');confirmed.textContent=String(item.assertable_demand);
+    tr.append(confirmed);
+    const inferred=el('td');
+    inferred.append(badge(`${item.inferred_demand} ask only`,item.inferred_demand?'warn':'muted'));
+    tr.append(inferred);
+    const ver=el('td');ver.append(item.verified?badge('yes','ok'):badge('no','warn'));tr.append(ver);
+    const off=el('td');off.append(item.offerable?badge('yes','ok'):badge('no','muted'));tr.append(off);
+    tr.append(el('td','muted',(item.proof||[]).slice(0,2).join(', ')||'—'));
+    return tr;
+  },'No demand recorded yet.');
+  root.append(wrap);
+}
+
+/* ── Action center ──────────────────────────────────────────────────────
+   Answers "what needs attention", from real state only. An item appears
+   because something is genuinely waiting, never to fill the panel. */
+
+async function loadActionCenter(){
+  const root=$('action-items');const panel=$('action-center');
+  const items=[];
+  try{
+    const [health,research,inv,blocked]=await Promise.all([
+      api('/health'),api('/research/progress'),api('/investigations'),api('/drafts/blocked')]);
+
+    const drafts=health.counts?.drafts||0;
+    if(drafts) items.push({tone:'ok',text:`${drafts} draft${drafts>1?'s':''} awaiting review`,view:'editorial'});
+
+    const blocks=(blocked.blocked||[]).length;
+    if(blocks) items.push({tone:'bad',text:`${blocks} draft${blocks>1?'s':''} blocked by Guardian`,view:'blocked'});
+
+    // Nav badges are refreshed here because this runs on boot and on every poll.
+    // Updating them only inside their own view meant a badge read 0 until clicked,
+    // which is a counter that lies for as long as you do not look at it.
+    $('nav-inv-count').textContent=inv.actionable_investigations;
+    $('nav-blocked-count').textContent=(blocked.blocked||[]).length;
+    if(inv.actionable_investigations)
+      items.push({tone:'warn',text:`${inv.actionable_investigations} question opportunities from inferred evidence`,view:'investigations'});
+
+    const un=research.coverage?.unresearched||0;
+    if(un) items.push({tone:'warn',text:`${un} prospects never researched`,view:'research'});
+
+    if(!health.catalogue?.can_recommend)
+      items.push({tone:'bad',text:'No verified service. Winston cannot recommend anything.',view:'catalog'});
+    if(health.rate_card?.all_prices_are_assumptions)
+      items.push({tone:'warn',text:'Every price is an operator assumption',view:'pricing'});
+    (health.misconfigured_providers||[]).forEach(p=>
+      items.push({tone:'warn',text:`${p.provider}: ${p.problem}`,view:'providers'}));
+    if(!health.funnel?.reply_tracking_enabled)
+      items.push({tone:'bad',text:'Reply tracking has never run. Outreach would produce no outcome data.',view:'ops'});
+  }catch(error){ items.push({tone:'bad',text:`Could not load status: ${error.message}`}); }
+
+  root.replaceChildren();
+  if(!items.length){panel.hidden=true;return}
+  panel.hidden=false;
+  $('action-count').textContent=`${items.length} item${items.length>1?'s':''}`;
+  items.forEach(item=>{
+    const row=el('button','action-item');
+    row.append(badge(item.tone==='bad'?'blocked':item.tone==='warn'?'attention':'ready',item.tone));
+    row.append(el('span',null,item.text));
+    if(item.view) row.onclick=()=>showView(item.view);
+    else row.disabled=true;
+    root.append(row);
+  });
 }
 
 /* Start only once every declaration above has been evaluated. */

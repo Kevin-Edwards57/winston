@@ -21,9 +21,11 @@
       <button class="nav-item" data-view="leads"><span>♙</span>Leads</button>
       <button class="nav-item" data-view="sent"><span>✉</span>Sent History</button>
       <button class="nav-item" data-view="social"><span>◎</span>Social Leads</button>
+      <button class="nav-item" data-view="investigations"><span>?</span>Investigations <em id="nav-inv-count">0</em></button>
       <button class="nav-item" data-view="blocked"><span>⛌</span>Guardian Blocks <em id="nav-blocked-count">0</em></button>
       <button class="nav-item" data-view="activity"><span>◈</span>Activity</button>
       <div class="nav-divider">OPERATIONS</div>
+      <button class="nav-item" data-view="demand"><span>◫</span>Offer Demand</button>
       <button class="nav-item" data-view="pricing"><span>$</span>Pricing</button>
       <button class="nav-item" data-view="catalog"><span>▦</span>Catalogue</button>
       <button class="nav-item" data-view="providers"><span>◈</span>AI &amp; Cost</button>
@@ -62,6 +64,10 @@
     </section>
 
     <main class="content" id="view-editorial">
+      <section class="card action-center" id="action-center" hidden>
+        <div class="panel-title"><b>Needs your attention</b><span id="action-count"></span></div>
+        <div id="action-items"></div>
+      </section>
       <div class="content-heading">
         <div><h1>Editorial Review</h1><p>Review, approve, queue, and explicitly confirm personalized outreach.</p></div>
         <div class="heading-actions"><span id="position-label">0 of 0</span><button id="prev-lead" title="Previous lead">‹</button><button id="next-lead" title="Next lead">›</button><button id="shortcuts-button">Keyboard Shortcuts</button></div>
@@ -132,6 +138,17 @@
     <main class="content view hidden" id="view-social">
       <div class="content-heading"><div><h1>Social Leads</h1><p>Businesses with a social presence and no email. Outreach is manual.</p></div></div>
       <section class="card"><div id="social-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-investigations">
+      <div class="content-heading"><div><h1>Investigations</h1><p>Inferred problems Winston can ask about but never assert.</p></div></div>
+      <div id="inv-summary"></div>
+      <section class="card"><div id="inv-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
+    </main>
+
+    <main class="content view hidden" id="view-demand">
+      <div class="content-heading"><div><h1>Offer Demand</h1><p>Confirmed demand and inferred demand, kept separate.</p></div></div>
+      <section class="card"><div id="demand-body" class="table-wrap"><div class="intel-empty">Loading…</div></div></section>
     </main>
 
     <main class="content view hidden" id="view-blocked">

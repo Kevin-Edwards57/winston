@@ -19,8 +19,8 @@ SCRIPT = (ROOT / "static" / "command-center.js").read_text()
 CODE = re.sub(r"/\*.*?\*/", "", SCRIPT, flags=re.S)
 CODE = re.sub(r"^\s*//.*$", "", CODE, flags=re.M)
 
-VIEWS = ("editorial", "sent", "social", "blocked", "pricing", "catalog", "providers",
-         "research", "projects", "agents", "ops")
+VIEWS = ("editorial", "sent", "social", "investigations", "demand", "blocked",
+         "pricing", "catalog", "providers", "research", "projects", "agents", "ops")
 
 
 class NavigationTests(unittest.TestCase):
@@ -174,3 +174,50 @@ class RouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandCenterGapTests(RouteTests):
+    """Capabilities that existed only behind curl before Priority 3."""
+
+    def test_investigations_view_exists(self):
+        self.assertIn('id="view-investigations"', TEMPLATE)
+        self.assertIn("loadInvestigations", SCRIPT)
+
+    def test_offer_demand_view_exists(self):
+        self.assertIn('id="view-demand"', TEMPLATE)
+        self.assertIn("loadDemand", SCRIPT)
+
+    def test_action_center_exists(self):
+        self.assertIn('id="action-center"', TEMPLATE)
+        self.assertIn("loadActionCenter", SCRIPT)
+
+    def test_offer_demand_never_sums_confirmed_and_inferred(self):
+        """Summing them is how booking looked strongest on 15 inferred matches."""
+        payload = self.client.get("/intelligence/offers").get_json()
+        for service in payload["services"]:
+            self.assertIn("assertable_demand", service)
+            self.assertIn("inferred_demand", service)
+            self.assertNotIn("demand", service)
+
+    def test_investigations_route_separates_actionable(self):
+        payload = self.client.get("/investigations").get_json()
+        self.assertIn("actionable_investigations", payload)
+        self.assertIn("unactionable_investigations", payload)
+
+    def test_nav_badges_refresh_outside_their_own_view(self):
+        """A badge that updates only when opened is a counter that lies."""
+        centre = SCRIPT[SCRIPT.index("async function loadActionCenter"):]
+        self.assertIn("nav-inv-count", centre)
+        self.assertIn("nav-blocked-count", centre)
+
+    def test_action_items_deep_link_to_real_views(self):
+        views = set(re.findall(r"view:'([a-z]+)'", SCRIPT))
+        declared = set(re.findall(r"const VIEWS = \[([^\]]+)\]", SCRIPT)[0]
+                       .replace("'", "").split(","))
+        for view in views:
+            self.assertIn(view, declared, f"action item links to unknown view {view}")
+
+    def test_every_view_has_a_loader_or_is_static(self):
+        declared = re.findall(r"const VIEWS = \[([^\]]+)\]", SCRIPT)[0].replace("'", "")
+        for view in [v.strip() for v in declared.split(",")]:
+            self.assertIn(f'id="view-{view}"', TEMPLATE, f"{view} has no container")

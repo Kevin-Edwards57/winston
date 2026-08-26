@@ -111,3 +111,14 @@
   font-size: 13px; cursor: pointer;
 }
 .palette-item:hover, .palette-item.active { background: #16222b; color: #46c98a; }
+
+/* Action center */
+.action-center { margin-bottom: 14px; }
+.action-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 10px; background: transparent; border: 0; border-bottom: 1px solid #14202a;
+  color: #dce7ee; font-size: 13px; cursor: pointer; border-radius: 6px;
+}
+.action-item:last-child { border-bottom: 0; }
+.action-item:hover:not(:disabled) { background: #16222b; }
+.action-item:disabled { cursor: default; opacity: .7; }
