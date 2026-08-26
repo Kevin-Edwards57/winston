@@ -99,6 +99,19 @@ UNSUPPORTED_FULFILMENT_PATTERNS = (
     (r"\bin\s+(?:just\s+)?\d+\s+(?:hours?|days?|weeks?)\b", "delivery-time claim"),
 )
 
+# Phrasings that assert a deficiency. In question mode these are hard failures
+# regardless of evidence, because the whole premise is that Winston does not know.
+# "I noticed you don't offer booking, do you?" is an assertion wearing a question mark.
+ASSERTION_PATTERNS = (
+    r"\b(?:i|we)\s+(?:noticed|see|saw|found|can see)\b[^.?]{0,40}\b(?:you|your)\b"
+    r"[^.?]{0,40}\b(?:don'?t|do not|doesn'?t|does not|lack|lacks|missing|no)\b",
+    r"\byour\s+(?:site|website|business)\s+(?:doesn'?t|does not|lacks|is missing)\b",
+    r"\byou\s+(?:don'?t|do not)\s+(?:have|offer|provide|use)\b",
+    r"\byou'?re\s+(?:missing|lacking|without)\b",
+    r"\bthere'?s\s+no\b[^.?]{0,30}\bon\s+your\b",
+    r"\bsince\s+you\s+(?:don'?t|do not)\b",
+)
+
 DEFAULT_CONFIDENCE_FLOOR = 0.5
 
 
@@ -157,11 +170,18 @@ class Guardian:
 
     def review(self, *, subject: str, body: str, contact: dict[str, Any],
                brief: dict[str, Any] | None = None) -> GuardianResult:
-        """Validate one draft. `brief` is the Writer's structured input."""
+        """Validate one draft. `brief` is the Writer's structured input.
+
+        A brief carrying ``mode: question`` is held to a different and stricter
+        standard: it must actually ask something, and it may assert nothing at all.
+        """
         result = GuardianResult()
         brief = brief or {}
         text = f"{subject}\n{body}"
         lowered = text.casefold()
+
+        if brief.get("mode") == "question":
+            self._check_question_mode(result, text, lowered, brief)
 
         self._check_style(result, text, lowered)
         self._check_unsupported_claims(result, text, lowered, brief)
@@ -180,6 +200,35 @@ class Guardian:
         if result.issues:
             result.confidence = 0.0
         return result
+
+    def _check_question_mode(self, result: GuardianResult, text: str, lowered: str,
+                             brief: dict[str, Any]) -> None:
+        """A question-mode draft must ask, and must not answer itself.
+
+        This is the guard that stops question mode becoming the loophole assertability
+        closed. An inferred problem is one Winston could not confirm, so a draft built
+        on it may not state anything about the business at all.
+        """
+        if "?" not in text:
+            result.fail("evidence", "question_mode_asserts_nothing_asked",
+                        "A question-mode draft contains no question.")
+
+        clean = True
+        for pattern in ASSERTION_PATTERNS:
+            match = re.search(pattern, lowered)
+            if match:
+                result.fail("evidence", "question_mode_assertion",
+                            "States a deficiency Winston could not confirm. In question "
+                            "mode the premise is that the answer is unknown.",
+                            text[max(0, match.start() - 30):match.end() + 30])
+                clean = False
+        if clean:
+            result.passed("evidence", "question_preserves_uncertainty")
+
+        if not brief.get("lead_investigation"):
+            result.fail("commercial", "no_investigation",
+                        "Question mode requires an inferred problem with a verified "
+                        "offer behind it.")
 
     # ── style ────────────────────────────────────────────────────────────
 
@@ -295,7 +344,7 @@ class Guardian:
                 result.evidence_checks.append(
                     {"rule": "observation_supported", "passed": True, "detail": code})
 
-        if not observed:
+        if not observed and brief.get("mode") != "question":
             result.fail("evidence", "no_evidence",
                         "No observed problems in the brief. Outreach must rest on research.")
             clean = False

@@ -31,6 +31,7 @@ from winston.ratecard import RateCard
 from winston.providers import ProviderRegistry
 from winston.costs import BudgetGuard
 from winston.fulfillment import FulfilmentBridge, NotBuilderFulfilled
+from winston.questions import InvestigationEngine, QuestionWriter
 
 load_dotenv()
 
@@ -55,6 +56,8 @@ fulfilment = FulfilmentBridge(repository, catalog, signal_store, fit_engine)
 fulfilment.initialize()
 writer = Writer(repository, catalog, signal_store, fit_engine, ai_service, pricing_engine)
 guardian = Guardian(repository, catalog)
+investigations = InvestigationEngine(repository, catalog, fit_engine)
+question_writer = QuestionWriter(repository, catalog, investigations, ai_service)
 pipeline = OutreachPipeline(repository, catalog, signal_store, fit_engine, writer, guardian)
 pipeline.initialize()
 json_write_lock = threading.RLock()
@@ -1529,6 +1532,41 @@ def run_bulk_research(limit: int) -> None:
             f"{progress['unreachable']} unreachable, {progress['failed']} failed")
     finally:
         progress["running"] = False
+
+
+@app.route('/investigations')
+def investigation_summary():
+    """Inferred problems worth asking about, never asserting."""
+    return jsonify(investigations.summary())
+
+
+@app.route('/prospects/<contact_id>/investigations')
+def prospect_investigations(contact_id):
+    try:
+        found = investigations.investigate(contact_id)
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+    return jsonify({"contact_id": contact_id,
+                    "investigations": [o.as_dict() for o in found],
+                    "actionable": sum(1 for o in found if o.actionable)})
+
+
+@app.route('/prospects/<contact_id>/question', methods=['POST'])
+def generate_question(contact_id):
+    """Generate a question-mode draft and review it. Nothing is queued."""
+    try:
+        draft = question_writer.write(contact_id)
+    except KeyError:
+        return jsonify({"error": "Unknown contact"}), 404
+    if draft.status != "drafted":
+        return jsonify(draft.as_dict()), 200
+
+    with repository.read() as connection:
+        contact = dict(connection.execute(
+            "SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone())
+    verdict = guardian.review(subject=draft.subject, body=draft.body,
+                              contact=contact, brief=draft.brief)
+    return jsonify({**draft.as_dict(), "guardian": verdict.as_dict()})
 
 
 @app.route('/intelligence/offers')
